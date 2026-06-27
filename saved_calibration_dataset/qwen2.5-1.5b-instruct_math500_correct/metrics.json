@@ -1,0 +1,11 @@
+{
+  "num_total": 500,
+  "num_scored": 500,
+  "num_correct": 80,
+  "accuracy": 0.16,
+  "raw_jsonl": "/data/shuozhe/Parameters-efficient-post-training/dataset/qwen2.5-1.5b-instruct_math500_correct/raw_actor_responses.jsonl",
+  "all_trajectories_jsonl": "/data/shuozhe/Parameters-efficient-post-training/dataset/qwen2.5-1.5b-instruct_math500_correct/all_actor_trajectories.jsonl",
+  "all_trajectories_parquet": "/data/shuozhe/Parameters-efficient-post-training/dataset/qwen2.5-1.5b-instruct_math500_correct/all_actor_trajectories.parquet",
+  "correct_jsonl": "/data/shuozhe/Parameters-efficient-post-training/dataset/qwen2.5-1.5b-instruct_math500_correct/correct_actor_responses.jsonl",
+  "calib_parquet": "/data/shuozhe/Parameters-efficient-post-training/dataset/qwen2.5-1.5b-instruct_math500_correct/qwen2.5-1.5b-instruct_math500_correct.parquet"
+}

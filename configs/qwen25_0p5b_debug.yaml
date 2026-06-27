@@ -1,0 +1,70 @@
+experiment_name: qwen25_0p5b_signed_taylor_debug
+seed: 42
+
+model:
+  model_name_or_path: /data/shuozhe/saved_model/Qwen2.5-0.5B
+  dtype: bf16
+  device: cuda:0
+  trust_remote_code: false
+
+pruning:
+  prune_ops: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  sparsities: [0.0, 0.5]
+  granularity: rowwise
+  save_pruned_models: false
+
+methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
+
+hybrid:
+  lambda_values: [0.001, 0.01]
+
+calibration:
+  type: prompt_response
+  path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
+  only_correct: true
+  loss_on: response_only
+  max_samples: 8
+  microbatch_size: 1
+  max_length: 2048
+
+calibration_ce:
+  path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
+  type: prompt_response
+  only_correct: true
+  loss_on: response_only
+  max_samples: 8
+  batch_size: 4
+  max_length: 2048
+
+heldout_ce:
+  path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
+  loss_on: response_only
+  max_samples: 16
+  batch_size: 4
+  max_length: 2048
+
+wikitext:
+  enabled: false
+  max_samples: 16
+  max_length: 1024
+
+task_accuracy:
+  enabled: false
+  dataset_path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct/qwen2.5-1.5b-instruct_math500_correct.parquet
+  backend: transformers
+  max_examples: 16
+  prompt_key: prompt
+  response_key: response
+  reward_score_dir: null
+  max_prompt_length: 1024
+  max_new_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+  top_k: 0
+  batch_size: 1
+
+output:
+  root_dir: results/debug
+  save_stats: true
+  save_masks: true
+  save_plots: true
