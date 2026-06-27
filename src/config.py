@@ -36,6 +36,7 @@ class CalibrationConfig:
     loss_on: str = "response_only"
     max_samples: int | None = None
     microbatch_size: int = 1
+    fisher_estimator: str = "microbatch"
     max_length: int = 4096
     text_key: str | None = None
     prompt_key: str = "prompt"
@@ -45,6 +46,7 @@ class CalibrationConfig:
 
 @dataclass
 class CalibrationCEConfig:
+    enabled: bool = True
     path: str | None = None
     type: str | None = None
     only_correct: bool | None = None
@@ -59,6 +61,7 @@ class CalibrationCEConfig:
 
 @dataclass
 class HeldoutCEConfig:
+    enabled: bool = True
     path: str | None = None
     loss_on: str = "response_only"
     max_samples: int | None = None

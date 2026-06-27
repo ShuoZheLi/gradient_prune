@@ -14,8 +14,14 @@ from model_utils import temporarily_disable_cache
 LOGGER = logging.getLogger(__name__)
 
 
-def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_dir: str | Path | None = None, calibration_type: str = "prompt_response", only_correct: bool = False, max_calibration_samples: int | None = None, microbatch_size: int = 1, gradient_accumulation_steps: int = 1, loss_on: str = "response_only", max_length: int = 4096, device: str | None = None, prune_ops=None, dtype: str = "bf16", seed: int = 42, model_name: str = "") -> dict[str, dict[str, torch.Tensor]]:
-    LOGGER.warning("Collecting microbatch empirical Fisher approximation; not exact per-sample Fisher.")
+def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_dir: str | Path | None = None, calibration_type: str = "prompt_response", only_correct: bool = False, max_calibration_samples: int | None = None, microbatch_size: int = 1, gradient_accumulation_steps: int = 1, loss_on: str = "response_only", max_length: int = 4096, device: str | None = None, prune_ops=None, dtype: str = "bf16", seed: int = 42, model_name: str = "", fisher_estimator: str = "microbatch") -> dict[str, dict[str, torch.Tensor]]:
+    fisher_estimator = str(fisher_estimator).lower()
+    if fisher_estimator not in {"microbatch", "per_example"}:
+        raise ValueError(f"Unsupported fisher_estimator={fisher_estimator!r}; use 'microbatch' or 'per_example'")
+    if fisher_estimator == "microbatch":
+        LOGGER.warning("Collecting microbatch empirical Fisher approximation; h depends on microbatch_size.")
+    else:
+        LOGGER.warning("Collecting per-example empirical Fisher; h is independent of microbatch grouping but requires one backward per example.")
     if device is None:
         device = str(next(model.parameters()).device)
     examples = load_calibration_examples(calibration_path, calibration_type=calibration_type, only_correct=only_correct, max_samples=max_calibration_samples, shuffle=False, seed=seed)
@@ -27,16 +33,31 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
     model.train(False)
     model.zero_grad(set_to_none=True)
     with temporarily_disable_cache(model):
-        for batch in tqdm(dataloader, desc="gradient stats"):
+        for batch in tqdm(dataloader, desc=f"gradient stats ({fisher_estimator})"):
             batch = {key: value.to(device) for key, value in batch.items()}
-            outputs = model(**batch)
-            outputs.loss.backward()
-            count += 1
-            _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum)
+            if fisher_estimator == "microbatch":
+                outputs = model(**batch)
+                outputs.loss.backward()
+                count += 1
+                _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum)
+            else:
+                for example_batch in _iter_single_examples(batch):
+                    outputs = model(**example_batch)
+                    outputs.loss.backward()
+                    count += 1
+                    _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum)
     stats = {name: {"g": grad_sum[name] / max(count, 1), "h": grad_sq_sum[name] / max(count, 1), "count": torch.tensor(count)} for name in modules}
     if output_dir is not None:
-        save_gradient_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": len(examples), "loss_on": loss_on, "microbatch_size": microbatch_size, "gradient_accumulation_steps": gradient_accumulation_steps, "prune_ops": prune_ops, "dtype": dtype, "seed": seed, "note": "microbatch empirical Fisher approximation"})
+        note = "microbatch empirical Fisher approximation" if fisher_estimator == "microbatch" else "per-example empirical Fisher"
+        save_gradient_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": len(examples), "loss_on": loss_on, "microbatch_size": microbatch_size, "fisher_estimator": fisher_estimator, "gradient_accumulation_steps": gradient_accumulation_steps, "prune_ops": prune_ops, "dtype": dtype, "seed": seed, "note": note})
     return stats
+
+
+def _iter_single_examples(batch: dict[str, torch.Tensor]):
+    first_tensor = next(iter(batch.values()))
+    batch_size = first_tensor.shape[0]
+    for idx in range(batch_size):
+        yield {key: value[idx : idx + 1] for key, value in batch.items()}
 
 
 def _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum):

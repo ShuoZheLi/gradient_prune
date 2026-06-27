@@ -38,3 +38,19 @@ def test_collate_left_pads_labels_with_ignore_index():
     assert batch["input_ids"].shape == batch["labels"].shape
     assert batch["labels"][0].tolist()[:2] == [IGNORE_INDEX, IGNORE_INDEX]
     assert batch["attention_mask"][0].tolist()[:2] == [0, 0]
+
+
+def test_full_trajectory_labels_prompt_and_response():
+    tokenizer = ToyTokenizer()
+    dataset = CalibrationDataset([CalibrationExample("ab", "cd", "abcd")], tokenizer, max_length=10, loss_on="full_trajectory")
+    item = dataset[0]
+    assert item["input_ids"].tolist() == [97, 98, 99, 100]
+    assert item["labels"].tolist() == [97, 98, 99, 100]
+
+
+def test_response_only_uses_response_not_whole_trajectory():
+    tokenizer = ToyTokenizer()
+    dataset = CalibrationDataset([CalibrationExample("ab", "cd", "SHOULD_NOT_BE_USED")], tokenizer, max_length=10, loss_on="response_only")
+    item = dataset[0]
+    assert item["input_ids"].tolist() == [97, 98, 99, 100]
+    assert item["labels"].tolist() == [IGNORE_INDEX, IGNORE_INDEX, 99, 100]

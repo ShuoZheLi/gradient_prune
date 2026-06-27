@@ -25,9 +25,11 @@ calibration:
   loss_on: response_only
   max_samples: 8
   microbatch_size: 1
+  fisher_estimator: per_example
   max_length: 2048
 
 calibration_ce:
+  enabled: true
   path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
   type: prompt_response
   only_correct: true
@@ -37,6 +39,7 @@ calibration_ce:
   max_length: 2048
 
 heldout_ce:
+  enabled: true
   path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
   loss_on: response_only
   max_samples: 16

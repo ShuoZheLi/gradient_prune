@@ -58,7 +58,7 @@ def run_experiment(config_path: str | Path):
     gradient_stats = None
     activation_stats = None
     if need_grad:
-        gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=config.seed, model_name=config.model.model_name_or_path)
+        gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, fisher_estimator=config.calibration.fisher_estimator, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=config.seed, model_name=config.model.model_name_or_path)
     if need_act:
         activation_stats = collect_activation_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "activations" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on="full_trajectory", max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, seed=config.seed, model_name=config.model.model_name_or_path)
     _save_representative_scores(model, gradient_stats, scores_dir, config.pruning.prune_ops)
@@ -102,23 +102,24 @@ def run_experiment(config_path: str | Path):
 def _evaluate_all(model, tokenizer, config, root: Path, method: str, sparsity: float, lambda_value):
     out = {"calibration_ce": None, "heldout_ce": None, "wikitext_ppl": None, "task_accuracy": None}
     cal_cfg = config.calibration_ce
-    cal = evaluate_ce(
-        model,
-        tokenizer,
-        path=cal_cfg.path or config.calibration.path,
-        calibration_type=cal_cfg.type or config.calibration.type,
-        loss_on=cal_cfg.loss_on or config.calibration.loss_on,
-        max_samples=cal_cfg.max_samples if cal_cfg.max_samples is not None else config.calibration.max_samples,
-        max_length=cal_cfg.max_length or config.calibration.max_length,
-        batch_size=cal_cfg.batch_size,
-        device=config.model.device,
-        only_correct=config.calibration.only_correct if cal_cfg.only_correct is None else cal_cfg.only_correct,
-        text_key=cal_cfg.text_key or config.calibration.text_key,
-        prompt_key=cal_cfg.prompt_key or config.calibration.prompt_key,
-        response_key=cal_cfg.response_key or config.calibration.response_key,
-    )
-    out["calibration_ce"] = cal["ce"]
-    if config.heldout_ce.path:
+    if cal_cfg.enabled:
+        cal = evaluate_ce(
+            model,
+            tokenizer,
+            path=cal_cfg.path or config.calibration.path,
+            calibration_type=cal_cfg.type or config.calibration.type,
+            loss_on=cal_cfg.loss_on or config.calibration.loss_on,
+            max_samples=cal_cfg.max_samples if cal_cfg.max_samples is not None else config.calibration.max_samples,
+            max_length=cal_cfg.max_length or config.calibration.max_length,
+            batch_size=cal_cfg.batch_size,
+            device=config.model.device,
+            only_correct=config.calibration.only_correct if cal_cfg.only_correct is None else cal_cfg.only_correct,
+            text_key=cal_cfg.text_key or config.calibration.text_key,
+            prompt_key=cal_cfg.prompt_key or config.calibration.prompt_key,
+            response_key=cal_cfg.response_key or config.calibration.response_key,
+        )
+        out["calibration_ce"] = cal["ce"]
+    if config.heldout_ce.enabled and config.heldout_ce.path:
         held = evaluate_ce(model, tokenizer, path=config.heldout_ce.path, calibration_type=config.calibration.type, loss_on=config.heldout_ce.loss_on, max_samples=config.heldout_ce.max_samples, max_length=config.heldout_ce.max_length, batch_size=config.heldout_ce.batch_size, device=config.model.device, text_key=config.heldout_ce.text_key, prompt_key=config.heldout_ce.prompt_key, response_key=config.heldout_ce.response_key)
         out["heldout_ce"] = held["ce"]
     if config.wikitext.enabled:
