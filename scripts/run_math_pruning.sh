@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 
-python -m experiment_runner \
+
+CUDA_VISIBLE_DEVICES=1,2,3 python -m experiment_runner \
   --config configs/qwen25_1p5b_math.yaml
 
 python -m plotting \

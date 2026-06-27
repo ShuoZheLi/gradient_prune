@@ -58,3 +58,12 @@ def save_pruned_model(model, tokenizer, output_dir: str | Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
+
+
+def load_masks(mask_dir: str | Path) -> dict[str, torch.Tensor]:
+    mask_dir = Path(mask_dir)
+    metadata_path = mask_dir / "metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Mask metadata not found: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    return {name: torch.load(mask_dir / file_name, map_location="cpu") for name, file_name in metadata["modules"].items()}

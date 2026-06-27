@@ -12,6 +12,8 @@ pruning:
   sparsities: [0.0, 0.5]
   granularity: rowwise
   save_pruned_models: false
+  load_masks: false
+  mask_root: null
 
 methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
 
@@ -30,6 +32,7 @@ calibration:
 
 calibration_ce:
   enabled: true
+  backend: transformers
   path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
   type: prompt_response
   only_correct: true
@@ -40,15 +43,22 @@ calibration_ce:
 
 heldout_ce:
   enabled: true
+  backend: transformers
   path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
   loss_on: response_only
   max_samples: 16
   batch_size: 4
   max_length: 2048
 
-wikitext:
+text_ppl:
   enabled: false
+  backend: transformers
+  dataset_name: wikitext
+  dataset_config: wikitext-2-raw-v1
+  split: validation
+  text_key: text
   max_samples: 16
+  batch_size: 1
   max_length: 1024
 
 task_accuracy:

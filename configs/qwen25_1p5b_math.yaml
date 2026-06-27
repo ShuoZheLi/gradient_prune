@@ -4,7 +4,7 @@ seed: 42
 model:
   model_name_or_path: /data/shuozhe/saved_model/Qwen2.5-1.5B-Instruct
   dtype: bf16
-  device: cuda:3
+  device: cuda:0
   trust_remote_code: false
 
 pruning:
@@ -12,6 +12,8 @@ pruning:
   sparsities: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
   granularity: rowwise
   save_pruned_models: false
+  load_masks: true
+  mask_root: /data/shuozhe/gradient_prune/results/qwen25_1p5b_signed_taylor_math/masks
 
 # methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
 
@@ -33,25 +35,51 @@ calibration:
 
 calibration_ce:
   enabled: true
+  backend: vllm
   path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
   type: prompt_response
   only_correct: true
   loss_on: response_only
   max_samples: 500
   batch_size: 32
+  data_parallel_size: 3
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.5
+  dtype: auto
+  enforce_eager: true
+  trust_remote_code: true
   max_length: 2048
 
 heldout_ce:
   enabled: false
+  backend: vllm
   path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
   loss_on: response_only
   max_samples: 256
   batch_size: 32
+  data_parallel_size: 3
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.5
+  dtype: auto
+  enforce_eager: true
+  trust_remote_code: true
   max_length: 2048
 
-wikitext:
+text_ppl:
   enabled: true
+  backend: vllm
+  dataset_name: wikitext
+  dataset_config: wikitext-2-raw-v1
+  split: validation
+  text_key: text
   max_samples: 256
+  batch_size: 32
+  data_parallel_size: 3
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.5
+  dtype: auto
+  enforce_eager: true
+  trust_remote_code: false
   max_length: 2048
 
 task_accuracy:
@@ -68,9 +96,9 @@ task_accuracy:
   top_p: 1.0
   top_k: 0
   batch_size: 32
-  data_parallel_size: 4
+  data_parallel_size: 3
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.9
+  gpu_memory_utilization: 0.5
   dtype: auto
   enforce_eager: true
   trust_remote_code: false

@@ -12,11 +12,11 @@ import numpy as np
 import torch
 
 from activation_stats import collect_activation_stats
-from apply_pruning import apply_masks, build_masks_for_model, save_masks, save_pruned_model
+from apply_pruning import apply_masks, build_masks_for_model, load_masks, save_masks, save_pruned_model
 from config import load_config, save_config
 from evaluate_accuracy import evaluate_task_accuracy
-from evaluate_ce import evaluate_ce
-from evaluate_ppl import evaluate_wikitext_ppl
+from evaluate_ce import evaluate_ce, evaluate_ce_vllm
+from evaluate_ppl import evaluate_text_ppl, evaluate_text_ppl_vllm
 from gradient_stats import collect_gradient_stats
 from layer_utils import iter_prunable_modules
 from masks import compute_mask_sparsity
@@ -53,14 +53,14 @@ def run_experiment(config_path: str | Path):
 
     model, tokenizer = load_model_and_tokenizer(config.model.model_name_or_path, config.model.dtype, config.model.device, config.model.trust_remote_code)
     methods = list(config.methods)
-    need_grad = any(method in GRAD_METHODS for method in methods)
-    need_act = any(method in ACT_METHODS for method in methods)
+    need_grad = (not config.pruning.load_masks) and any(method in GRAD_METHODS for method in methods)
+    need_act = (not config.pruning.load_masks) and any(method in ACT_METHODS for method in methods)
     gradient_stats = None
     activation_stats = None
     if need_grad:
-        gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, fisher_estimator=config.calibration.fisher_estimator, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=config.seed, model_name=config.model.model_name_or_path)
+        gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, fisher_estimator=config.calibration.fisher_estimator, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path)
     if need_act:
-        activation_stats = collect_activation_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "activations" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on="full_trajectory", max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, seed=config.seed, model_name=config.model.model_name_or_path)
+        activation_stats = collect_activation_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "activations" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on="full_trajectory", max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path)
     _save_representative_scores(model, gradient_stats, scores_dir, config.pruning.prune_ops)
 
     rows = []
@@ -73,10 +73,15 @@ def run_experiment(config_path: str | Path):
                     continue
                 LOGGER.info("Running method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
                 run_model = model if method == "dense" and float(sparsity) == 0.0 else copy.deepcopy(model)
-                masks = build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
-                apply_masks(run_model, masks, config.pruning.prune_ops)
                 mask_dir = masks_root / f"method={method}" / f"sparsity={sparsity}" / (f"lambda={lambda_value}" if lambda_value is not None else "lambda=none")
-                if config.output.save_masks:
+                if config.pruning.load_masks:
+                    source_mask_dir = _resolve_mask_dir(config, method, sparsity, lambda_value)
+                    masks = load_masks(source_mask_dir)
+                    LOGGER.info("Loaded masks from %s", source_mask_dir)
+                else:
+                    masks = build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
+                apply_masks(run_model, masks, config.pruning.prune_ops)
+                if config.output.save_masks and not config.pruning.load_masks:
                     save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value})
                 if config.pruning.save_pruned_models and method != "dense":
                     save_pruned_model(run_model, tokenizer, root / "models" / f"method={method}" / f"sparsity={sparsity}")
@@ -101,38 +106,57 @@ def run_experiment(config_path: str | Path):
 
 def _evaluate_all(model, tokenizer, config, root: Path, method: str, sparsity: float, lambda_value):
     out = {"calibration_ce": None, "heldout_ce": None, "wikitext_ppl": None, "task_accuracy": None}
+    eval_model_path = None
+    if _needs_vllm_checkpoint(config):
+        eval_model_path = root / "eval_models" / f"method={method}" / f"sparsity={sparsity}" / (f"lambda={lambda_value}" if lambda_value is not None else "lambda=none")
+        if not _hf_checkpoint_exists(eval_model_path):
+            save_pruned_model(model, tokenizer, eval_model_path)
     cal_cfg = config.calibration_ce
     if cal_cfg.enabled:
-        cal = evaluate_ce(
-            model,
-            tokenizer,
+        cal_kwargs = dict(
             path=cal_cfg.path or config.calibration.path,
             calibration_type=cal_cfg.type or config.calibration.type,
             loss_on=cal_cfg.loss_on or config.calibration.loss_on,
             max_samples=cal_cfg.max_samples if cal_cfg.max_samples is not None else config.calibration.max_samples,
             max_length=cal_cfg.max_length or config.calibration.max_length,
             batch_size=cal_cfg.batch_size,
-            device=config.model.device,
             only_correct=config.calibration.only_correct if cal_cfg.only_correct is None else cal_cfg.only_correct,
             text_key=cal_cfg.text_key or config.calibration.text_key,
             prompt_key=cal_cfg.prompt_key or config.calibration.prompt_key,
             response_key=cal_cfg.response_key or config.calibration.response_key,
         )
+        if cal_cfg.backend == "vllm":
+            cal = evaluate_ce_vllm(model_path=eval_model_path, data_parallel_size=cal_cfg.data_parallel_size, tensor_parallel_size=cal_cfg.tensor_parallel_size, gpu_memory_utilization=cal_cfg.gpu_memory_utilization, dtype=cal_cfg.dtype, enforce_eager=cal_cfg.enforce_eager, trust_remote_code=cal_cfg.trust_remote_code, seed=getattr(config, "seed", 42), **cal_kwargs)
+        elif cal_cfg.backend == "transformers":
+            cal = evaluate_ce(model, tokenizer, device=config.model.device, **cal_kwargs)
+        else:
+            raise ValueError(f"Unsupported calibration_ce backend: {cal_cfg.backend}")
         out["calibration_ce"] = cal["ce"]
     if config.heldout_ce.enabled and config.heldout_ce.path:
-        held = evaluate_ce(model, tokenizer, path=config.heldout_ce.path, calibration_type=config.calibration.type, loss_on=config.heldout_ce.loss_on, max_samples=config.heldout_ce.max_samples, max_length=config.heldout_ce.max_length, batch_size=config.heldout_ce.batch_size, device=config.model.device, text_key=config.heldout_ce.text_key, prompt_key=config.heldout_ce.prompt_key, response_key=config.heldout_ce.response_key)
+        held_kwargs = dict(path=config.heldout_ce.path, calibration_type=config.calibration.type, loss_on=config.heldout_ce.loss_on, max_samples=config.heldout_ce.max_samples, max_length=config.heldout_ce.max_length, batch_size=config.heldout_ce.batch_size, text_key=config.heldout_ce.text_key, prompt_key=config.heldout_ce.prompt_key, response_key=config.heldout_ce.response_key)
+        if config.heldout_ce.backend == "vllm":
+            held = evaluate_ce_vllm(model_path=eval_model_path, data_parallel_size=config.heldout_ce.data_parallel_size, tensor_parallel_size=config.heldout_ce.tensor_parallel_size, gpu_memory_utilization=config.heldout_ce.gpu_memory_utilization, dtype=config.heldout_ce.dtype, enforce_eager=config.heldout_ce.enforce_eager, trust_remote_code=config.heldout_ce.trust_remote_code, seed=getattr(config, "seed", 42), **held_kwargs)
+        elif config.heldout_ce.backend == "transformers":
+            held = evaluate_ce(model, tokenizer, device=config.model.device, **held_kwargs)
+        else:
+            raise ValueError(f"Unsupported heldout_ce backend: {config.heldout_ce.backend}")
         out["heldout_ce"] = held["ce"]
-    if config.wikitext.enabled:
+    if config.text_ppl.enabled:
         try:
-            ppl = evaluate_wikitext_ppl(model, tokenizer, dataset_name=config.wikitext.dataset_name, dataset_config=config.wikitext.dataset_config, split=config.wikitext.split, text_key=config.wikitext.text_key, max_samples=config.wikitext.max_samples, max_length=config.wikitext.max_length, batch_size=1, device=config.model.device)
+            if config.text_ppl.backend == "vllm":
+                ppl = evaluate_text_ppl_vllm(model_path=eval_model_path, dataset_name=config.text_ppl.dataset_name, dataset_config=config.text_ppl.dataset_config, split=config.text_ppl.split, text_key=config.text_ppl.text_key, max_samples=config.text_ppl.max_samples, max_length=config.text_ppl.max_length, batch_size=config.text_ppl.batch_size, data_parallel_size=config.text_ppl.data_parallel_size, tensor_parallel_size=config.text_ppl.tensor_parallel_size, gpu_memory_utilization=config.text_ppl.gpu_memory_utilization, dtype=config.text_ppl.dtype, enforce_eager=config.text_ppl.enforce_eager, trust_remote_code=config.text_ppl.trust_remote_code, seed=getattr(config, "seed", 42))
+            elif config.text_ppl.backend == "transformers":
+                ppl = evaluate_text_ppl(model, tokenizer, dataset_name=config.text_ppl.dataset_name, dataset_config=config.text_ppl.dataset_config, split=config.text_ppl.split, text_key=config.text_ppl.text_key, max_samples=config.text_ppl.max_samples, max_length=config.text_ppl.max_length, batch_size=config.text_ppl.batch_size, device=config.model.device)
+            else:
+                raise ValueError(f"Unsupported text_ppl backend: {config.text_ppl.backend}")
             out["wikitext_ppl"] = ppl["perplexity"]
         except Exception as exc:
-            LOGGER.warning("WikiText PPL failed: %s", exc)
+            LOGGER.warning("Text PPL failed: %s", exc)
     if config.task_accuracy.enabled and config.task_accuracy.dataset_path:
         acc_dir = root / "accuracy" / f"method={method}" / f"sparsity={sparsity}" / (f"lambda={lambda_value}" if lambda_value is not None else "lambda=none")
         accuracy_model = model
         if config.task_accuracy.backend == "vllm":
-            accuracy_model = acc_dir / "vllm_model"
+            accuracy_model = eval_model_path or (acc_dir / "vllm_model")
             if not _hf_checkpoint_exists(accuracy_model):
                 save_pruned_model(model, tokenizer, accuracy_model)
         acc = evaluate_task_accuracy(
@@ -162,6 +186,20 @@ def _evaluate_all(model, tokenizer, config, root: Path, method: str, sparsity: f
         )
         out["task_accuracy"] = acc["accuracy"]
     return out
+
+
+def _resolve_mask_dir(config, method: str, sparsity, lambda_value) -> Path:
+    root = Path(config.pruning.mask_root) if config.pruning.mask_root else Path(config.output.root_dir) / "masks"
+    return root / f"method={method}" / f"sparsity={sparsity}" / (f"lambda={lambda_value}" if lambda_value is not None else "lambda=none")
+
+
+def _needs_vllm_checkpoint(config) -> bool:
+    return (
+        (config.calibration_ce.enabled and config.calibration_ce.backend == "vllm")
+        or (config.heldout_ce.enabled and config.heldout_ce.path and config.heldout_ce.backend == "vllm")
+        or (config.text_ppl.enabled and config.text_ppl.backend == "vllm")
+        or (config.task_accuracy.enabled and config.task_accuracy.dataset_path and config.task_accuracy.backend == "vllm")
+    )
 
 
 def _hf_checkpoint_exists(path: Path) -> bool:

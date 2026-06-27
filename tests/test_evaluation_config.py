@@ -6,7 +6,7 @@ from config import load_config
 
 def test_calibration_ce_config_is_separate_from_stat_microbatch_size():
     cfg = load_config("configs/qwen25_1p5b_math.yaml")
-    assert cfg.calibration.microbatch_size == 8
+    assert cfg.calibration.microbatch_size == 32
     assert cfg.calibration_ce.batch_size == 32
     assert cfg.heldout_ce.batch_size == 32
 
@@ -35,6 +35,7 @@ def test_evaluate_all_uses_calibration_ce_batch_size(monkeypatch):
         ),
         calibration_ce=SimpleNamespace(
             enabled=True,
+            backend="transformers",
             path="ce-path",
             type="prompt_response",
             only_correct=False,
@@ -48,6 +49,7 @@ def test_evaluate_all_uses_calibration_ce_batch_size(monkeypatch):
         ),
         heldout_ce=SimpleNamespace(
             enabled=True,
+            backend="transformers",
             path="held-path",
             loss_on="response_only",
             max_samples=6,
@@ -57,7 +59,7 @@ def test_evaluate_all_uses_calibration_ce_batch_size(monkeypatch):
             prompt_key="prompt",
             response_key="response",
         ),
-        wikitext=SimpleNamespace(enabled=False),
+        text_ppl=SimpleNamespace(enabled=False),
         task_accuracy=SimpleNamespace(enabled=False, dataset_path=None),
     )
 
@@ -81,12 +83,43 @@ def test_evaluate_all_can_disable_calibration_and_heldout_ce(monkeypatch):
     cfg = SimpleNamespace(
         model=SimpleNamespace(device="cpu"),
         calibration=SimpleNamespace(path="stats-path", type="prompt_response", only_correct=True, loss_on="response_only", max_samples=10, microbatch_size=99, max_length=100, text_key=None, prompt_key="prompt", response_key="response"),
-        calibration_ce=SimpleNamespace(enabled=False),
-        heldout_ce=SimpleNamespace(enabled=False, path="held-path"),
-        wikitext=SimpleNamespace(enabled=False),
+        calibration_ce=SimpleNamespace(enabled=False, backend="transformers"),
+        heldout_ce=SimpleNamespace(enabled=False, backend="transformers", path="held-path"),
+        text_ppl=SimpleNamespace(enabled=False),
         task_accuracy=SimpleNamespace(enabled=False, dataset_path=None),
     )
 
     metrics = experiment_runner._evaluate_all(None, None, cfg, root="unused", method="m", sparsity=0.0, lambda_value=None)
     assert metrics["calibration_ce"] is None
     assert metrics["heldout_ce"] is None
+
+
+def test_evaluate_all_uses_vllm_ce_backend(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_save(model, tokenizer, output_dir):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "config.json").write_text("{}")
+        (output_dir / "model.safetensors").write_text("stub")
+
+    def fake_vllm_ce(**kwargs):
+        calls.append(kwargs)
+        return {"ce": 2.0, "perplexity": 1.0, "num_tokens": 2, "num_examples": 1}
+
+    monkeypatch.setattr(experiment_runner, "save_pruned_model", fake_save)
+    monkeypatch.setattr(experiment_runner, "evaluate_ce_vllm", fake_vllm_ce)
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(device="cpu"),
+        calibration=SimpleNamespace(path="stats-path", type="prompt_response", only_correct=True, loss_on="response_only", max_samples=10, microbatch_size=99, max_length=100, text_key=None, prompt_key="prompt", response_key="response"),
+        calibration_ce=SimpleNamespace(enabled=True, backend="vllm", path="ce-path", type="prompt_response", only_correct=True, loss_on="response_only", max_samples=5, batch_size=3, data_parallel_size=4, tensor_parallel_size=1, gpu_memory_utilization=0.8, dtype="auto", enforce_eager=True, trust_remote_code=False, max_length=77, text_key=None, prompt_key="prompt", response_key="response"),
+        heldout_ce=SimpleNamespace(enabled=False, backend="transformers", path=None),
+        text_ppl=SimpleNamespace(enabled=False),
+        task_accuracy=SimpleNamespace(enabled=False, dataset_path=None, backend="transformers"),
+    )
+
+    metrics = experiment_runner._evaluate_all(None, None, cfg, root=tmp_path, method="m", sparsity=0.5, lambda_value=None)
+
+    assert metrics["calibration_ce"] == 2.0
+    assert calls[0]["model_path"] == tmp_path / "eval_models" / "method=m" / "sparsity=0.5" / "lambda=none"
+    assert calls[0]["data_parallel_size"] == 4
+    assert calls[0]["batch_size"] == 3
