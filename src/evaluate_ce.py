@@ -117,7 +117,7 @@ def evaluate_ce_vllm_examples(
             kwargs={
                 "progress_queue": progress_queue,
                 "worker_id": worker_id,
-                "gpu_ids": str(worker_id),
+                "gpu_ids": _worker_cuda_visible_devices(worker_id),
                 "model_path": str(model_path),
                 "examples": shard,
                 "loss_on": loss_on,
@@ -168,6 +168,18 @@ def evaluate_ce_vllm_examples(
         if process.exitcode != 0:
             raise RuntimeError(f"vLLM CE worker exited with code {process.exitcode}")
     return _ce_metrics(total_nll, total_tokens, total_examples)
+
+
+def _worker_cuda_visible_devices(worker_id: int) -> str:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not visible_devices:
+        return str(worker_id)
+    devices = [device.strip() for device in visible_devices.split(",") if device.strip()]
+    if not devices:
+        return str(worker_id)
+    if worker_id >= len(devices):
+        raise ValueError(f"Worker {worker_id} requested, but CUDA_VISIBLE_DEVICES only has {len(devices)} device(s): {visible_devices}")
+    return devices[worker_id]
 
 
 def _vllm_ce_worker_entrypoint(progress_queue, **kwargs):

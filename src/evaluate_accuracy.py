@@ -4,7 +4,6 @@ import json
 import multiprocessing as mp
 import os
 import queue
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,37 +12,27 @@ from tqdm import tqdm
 
 from data_utils import first_present, load_table
 from model_utils import load_model_and_tokenizer
+from task_scoring import (
+    dataframe_to_task_examples,
+    extract_data_source,
+    extract_ground_truth,
+    extract_prompt,
+    score_math_response,
+    score_task_response,
+    task_example_to_dict,
+)
 
 
-def extract_math_answer(text: Any) -> str | None:
-    if text is None:
-        return None
-    text = str(text)
-    boxed = re.findall(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", text)
-    if boxed:
-        return _normalize_answer(boxed[-1])
-    hashes = re.findall(r"####\s*([^\n]+)", text)
-    if hashes:
-        return _normalize_answer(hashes[-1])
-    numbers = re.findall(r"[-+]?\d*\.?\d+(?:/\d+)?", text.replace(",", ""))
-    return _normalize_answer(numbers[-1]) if numbers else _normalize_answer(text.splitlines()[-1] if text else "")
+def _extract_prompt(row, prompt_key: str, tokenizer=None) -> str:
+    return extract_prompt(row, prompt_key, tokenizer)
 
 
-def _normalize_answer(answer: str | None) -> str | None:
-    if answer is None:
-        return None
-    answer = str(answer).strip()
-    answer = answer.replace("$", "").replace("\\left", "").replace("\\right", "")
-    answer = re.sub(r"\s+", "", answer)
-    answer = answer.strip(".。")
-    return answer
+def _extract_data_source(row) -> str:
+    return extract_data_source(row)
 
 
-def score_math_response(response: str, ground_truth: Any) -> tuple[float, bool]:
-    pred = extract_math_answer(response)
-    gold = extract_math_answer(ground_truth)
-    correct = pred is not None and gold is not None and pred == gold
-    return (1.0 if correct else 0.0), correct
+def _extract_ground_truth(row, response_key: str | None) -> Any:
+    return extract_ground_truth(row, response_key)
 
 
 def evaluate_task_accuracy(
@@ -94,6 +83,7 @@ def evaluate_task_accuracy(
             dtype,
             enforce_eager,
             trust_remote_code,
+            reward_score_dir,
             batch_size=batch_size,
         )
     if backend != "transformers":
@@ -115,7 +105,7 @@ def evaluate_task_accuracy(
     model.eval()
     for start in tqdm(range(0, len(df), batch_size), desc="task accuracy"):
         chunk = df.iloc[start : start + batch_size]
-        prompts = [str(first_present(row, [prompt_key, "prompt", "query", "question", "problem"], "")) for _, row in chunk.iterrows()]
+        prompts = [_extract_prompt(row, prompt_key, tokenizer) for _, row in chunk.iterrows()]
         encoded = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=max_prompt_length).to(device)
         do_sample = temperature and temperature > 0
         gen_kwargs = {"max_new_tokens": max_new_tokens, "do_sample": bool(do_sample), "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id}
@@ -128,11 +118,11 @@ def evaluate_task_accuracy(
         new_ids = output_ids[:, encoded["input_ids"].shape[1] :]
         responses = tokenizer.batch_decode(new_ids, skip_special_tokens=True)
         for offset, ((_, row), prompt, response) in enumerate(zip(chunk.iterrows(), prompts, responses)):
-            ground_truth = first_present(row, [response_key] if response_key else [], None)
-            if ground_truth is None:
-                ground_truth = first_present(row, ["ground_truth", "answer", "solution", "response"], None)
-            task_score, is_correct = score_math_response(response, ground_truth)
-            rows.append({"example_id": int(first_present(row, ["example_id", "id"], start + offset)), "prompt": prompt, "response": response, "ground_truth": ground_truth, "task_score": task_score, "is_correct": is_correct})
+            ground_truth = _extract_ground_truth(row, response_key)
+            data_source = _extract_data_source(row)
+            task_score, is_correct = score_task_response(response, ground_truth, data_source, reward_score_dir)
+            task_score_value = None if ground_truth is None else task_score
+            rows.append({"example_id": int(first_present(row, ["example_id", "id"], start + offset)), "prompt": prompt, "response": response, "ground_truth": ground_truth, "data_source": data_source, "task_score": task_score_value, "is_correct": is_correct})
     metrics = _write_accuracy_outputs(rows, output_jsonl, metrics_json)
     return metrics
 
@@ -158,11 +148,19 @@ def _evaluate_vllm(*args, **kwargs):
         dtype,
         enforce_eager,
         trust_remote_code,
+        reward_score_dir,
     ) = args
     df = load_table(dataset_path)
     if max_examples is not None:
         df = df.head(max_examples)
-    examples = _dataframe_to_accuracy_examples(df, prompt_key, response_key)
+    tokenizer = None
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path), use_fast=False, trust_remote_code=bool(trust_remote_code))
+    except Exception:
+        tokenizer = None
+    examples = _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer)
     if not examples:
         return _write_accuracy_outputs([], output_jsonl, metrics_json)
     worker_count = min(max(int(data_parallel_size), 1), len(examples))
@@ -185,6 +183,7 @@ def _evaluate_vllm(*args, **kwargs):
             dtype=dtype,
             enforce_eager=enforce_eager,
             trust_remote_code=trust_remote_code,
+            reward_score_dir=reward_score_dir,
         )
         return _write_accuracy_outputs(rows, output_jsonl, metrics_json)
 
@@ -199,7 +198,7 @@ def _evaluate_vllm(*args, **kwargs):
     progress_queue = ctx.Queue()
     processes = []
     for worker_id, shard in enumerate(shards):
-        gpu_id = str(worker_id)
+        gpu_id = _worker_cuda_visible_devices(worker_id)
         process = ctx.Process(
             target=_vllm_worker_entrypoint,
             kwargs={
@@ -220,6 +219,7 @@ def _evaluate_vllm(*args, **kwargs):
                 "dtype": dtype,
                 "enforce_eager": enforce_eager,
                 "trust_remote_code": trust_remote_code,
+                "reward_score_dir": reward_score_dir,
             },
         )
         process.start()
@@ -262,15 +262,8 @@ def batch_size_from_kwargs(kwargs: dict) -> int:
     return max(int(kwargs.get("batch_size", 1)), 1)
 
 
-def _dataframe_to_accuracy_examples(df, prompt_key: str, response_key: str | None) -> list[dict[str, Any]]:
-    examples = []
-    for idx, (_, row) in enumerate(df.iterrows()):
-        prompt = str(first_present(row, [prompt_key, "prompt", "query", "question", "problem"], ""))
-        ground_truth = first_present(row, [response_key] if response_key else [], None)
-        if ground_truth is None:
-            ground_truth = first_present(row, ["ground_truth", "answer", "solution", "response"], None)
-        examples.append({"example_id": int(first_present(row, ["example_id", "id"], idx)), "prompt": prompt, "ground_truth": ground_truth})
-    return examples
+def _dataframe_to_accuracy_examples(df, prompt_key: str, response_key: str | None, tokenizer=None) -> list[dict[str, Any]]:
+    return [task_example_to_dict(example) for example in dataframe_to_task_examples(df, prompt_key, response_key, tokenizer)]
 
 
 def _split_round_robin(items: list[dict[str, Any]], num_shards: int) -> list[list[dict[str, Any]]]:
@@ -278,6 +271,18 @@ def _split_round_robin(items: list[dict[str, Any]], num_shards: int) -> list[lis
     for idx, item in enumerate(items):
         shards[idx % num_shards].append(item)
     return shards
+
+
+def _worker_cuda_visible_devices(worker_id: int) -> str:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not visible_devices:
+        return str(worker_id)
+    devices = [device.strip() for device in visible_devices.split(",") if device.strip()]
+    if not devices:
+        return str(worker_id)
+    if worker_id >= len(devices):
+        raise ValueError(f"Worker {worker_id} requested, but CUDA_VISIBLE_DEVICES only has {len(devices)} device(s): {visible_devices}")
+    return devices[worker_id]
 
 
 def _vllm_worker_entrypoint(progress_queue, **kwargs):
@@ -307,6 +312,7 @@ def _run_vllm_worker(
     dtype: str,
     enforce_eager: bool,
     trust_remote_code: bool,
+    reward_score_dir: str | Path | None,
     progress_queue=None,
 ) -> list[dict[str, Any]]:
     if gpu_ids is not None:
@@ -338,8 +344,9 @@ def _run_vllm_worker(
         outputs = llm.generate(prompts, sampling, use_tqdm=False)
         for example, output in zip(batch, outputs):
             response = output.outputs[0].text
-            task_score, is_correct = score_math_response(response, example["ground_truth"])
-            rows.append({"example_id": example["example_id"], "prompt": example["prompt"], "response": response, "ground_truth": example["ground_truth"], "task_score": task_score, "is_correct": is_correct})
+            task_score, is_correct = score_task_response(response, example["ground_truth"], example.get("data_source", ""), reward_score_dir)
+            task_score_value = None if example["ground_truth"] is None else task_score
+            rows.append({"example_id": example["example_id"], "prompt": example["prompt"], "response": response, "ground_truth": example["ground_truth"], "data_source": example.get("data_source", ""), "task_score": task_score_value, "is_correct": is_correct})
         if progress_queue is not None:
             progress_queue.put(("progress", len(batch)))
     return rows
@@ -352,9 +359,10 @@ def _write_accuracy_outputs(rows, output_jsonl, metrics_json):
         with open(output_jsonl, "w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-    num_scored = len(rows)
-    num_correct = sum(1 for row in rows if row["is_correct"])
-    metrics = {"accuracy": num_correct / max(num_scored, 1), "pass@1": num_correct / max(num_scored, 1), "num_examples": len(rows), "num_scored": num_scored, "num_correct": num_correct}
+    num_scored = sum(1 for row in rows if row.get("task_score") is not None)
+    num_correct = sum(1 for row in rows if row.get("task_score") is not None and row["is_correct"])
+    accuracy = num_correct / max(num_scored, 1)
+    metrics = {"accuracy": accuracy, "pass@1": accuracy, "num_examples": len(rows), "num_scored": num_scored, "num_unscored": len(rows) - num_scored, "num_correct": num_correct}
     if metrics_json is not None:
         metrics_json = Path(metrics_json)
         metrics_json.parent.mkdir(parents=True, exist_ok=True)

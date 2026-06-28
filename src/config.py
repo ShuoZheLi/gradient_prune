@@ -23,6 +23,8 @@ class PruningConfig:
     save_pruned_models: bool = False
     load_masks: bool = False
     mask_root: str | None = None
+    load_scores: bool = False
+    score_root: str | None = None
 
 
 @dataclass

@@ -7,7 +7,7 @@ cd "$repo_root"
 python_bin="${PYTHON_BIN:-python}"
 model_path="${MODEL_PATH:-/data/shuozhe/saved_model/Qwen2.5-1.5B-Instruct}"
 dataset_path="${DATASET_PATH:-/data/shuozhe/saved_dataset/MetaMathQA-math-500/math7500.parquet}"
-output_dir="${OUTPUT_DIR:-$repo_root/dataset/qwen2.5-1.5b-instruct_math7500_correct}"
+output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen2.5-1.5b-instruct_math7500_correct}"
 raw_jsonl="${RAW_JSONL:-$output_dir/raw_actor_responses.jsonl}"
 shard_dir="${SHARD_DIR:-$output_dir/shards}"
 all_trajectories_jsonl="${ALL_TRAJECTORIES_JSONL:-$output_dir/all_actor_trajectories.jsonl}"
@@ -21,22 +21,33 @@ start_index="${START_INDEX:-0}"
 seed="${SEED:-42}"
 max_prompt_length="${MAX_PROMPT_LENGTH:-2048}"
 max_new_tokens="${MAX_NEW_TOKENS:-2048}"
+generation_backend="${GENERATION_BACKEND:-vllm}"
+batch_size="${BATCH_SIZE:-32}"
+generation_max_batch_tokens="${GENERATION_MAX_BATCH_TOKENS:-0}"
+response_log_max="${RESPONSE_LOG_MAX:--1}"
+use_cache="${USE_CACHE:-0}"
 temperature="${TEMPERATURE:-1.0}"
 top_p="${TOP_P:-1.0}"
 top_k="${TOP_K:-0}"
-dtype="${DTYPE:-bf16}"
+dtype="${DTYPE:-auto}"
 devices="${DEVICES:-0 1 2 3}"
+tensor_parallel_size="${TENSOR_PARALLEL_SIZE:-1}"
+gpu_memory_utilization="${GPU_MEMORY_UTILIZATION:-0.8}"
+enforce_eager="${ENFORCE_EAGER:-1}"
 response_key="${RESPONSE_KEY:-}"
 reward_score_dir="${REWARD_SCORE_DIR:-}"
 trust_remote_code="${TRUST_REMOTE_CODE:-0}"
 skip_merge="${SKIP_MERGE:-1}"
 progress_interval="${PROGRESS_INTERVAL:-5}"
+dry_run="${DRY_RUN:-0}"
 
 mkdir -p "$output_dir" "$shard_dir"
 
 echo "[collect] model_path=$model_path"
 echo "[collect] dataset_path=$dataset_path"
 echo "[collect] raw_jsonl=$raw_jsonl"
+echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache"
+echo "[collect] vllm tensor_parallel_size=$tensor_parallel_size gpu_memory_utilization=$gpu_memory_utilization enforce_eager=$enforce_eager"
 
 run_generation_shard() {
     shard_id="$1"
@@ -45,21 +56,74 @@ run_generation_shard() {
     shard_device="$4"
     shard_output="$5"
 
-    set -- downstream_eval/generate_actor_responses_minimal.py \
-        --checkpoint_dir "$model_path" \
-        --dataset_path "$dataset_path" \
-        --output_path "$shard_output" \
-        --prompt_key prompt \
-        --start_index "$shard_start" \
-        --max_examples "$shard_count" \
-        --seed "$seed" \
-        --max_prompt_length "$max_prompt_length" \
-        --max_new_tokens "$max_new_tokens" \
-        --temperature "$temperature" \
-        --top_p "$top_p" \
-        --top_k "$top_k" \
-        --dtype "$dtype" \
-        --device cuda:0
+    if [ "$generation_backend" = "vllm" ]; then
+        actor_dir="$model_path"
+        if [ "$skip_merge" != "1" ]; then
+            actor_dir=$("$python_bin" - "$model_path" <<'PYRESOLVE'
+import sys
+from create_calibration_dataset.generate_actor_responses_minimal import resolve_actor_hf_dir
+print(resolve_actor_hf_dir(sys.argv[1], skip_merge=False))
+PYRESOLVE
+)
+        fi
+        shard_metrics="$shard_dir/metrics_shard_${shard_id}.json"
+        set -- create_calibration_dataset/vllm_accuracy_runner.py \
+            --model_path "$actor_dir" \
+            --dataset_path "$dataset_path" \
+            --output_path "$shard_output" \
+            --metrics_path "$shard_metrics" \
+            --prompt_key prompt \
+            --start_index "$shard_start" \
+            --max_examples "$shard_count" \
+            --seed "$seed" \
+            --max_prompt_length "$max_prompt_length" \
+            --max_new_tokens "$max_new_tokens" \
+            --batch_size "$batch_size" \
+            --generation_max_batch_tokens "$generation_max_batch_tokens" \
+            --response_log_max "$response_log_max" \
+            --temperature "$temperature" \
+            --top_p "$top_p" \
+            --top_k "$top_k" \
+            --tensor_parallel_size "$tensor_parallel_size" \
+            --gpu_memory_utilization "$gpu_memory_utilization" \
+            --dtype "$dtype"
+        if [ "$enforce_eager" = "1" ]; then
+            set -- "$@" --enforce_eager
+        else
+            set -- "$@" --no_enforce_eager
+        fi
+    elif [ "$generation_backend" = "transformers" ]; then
+        set -- create_calibration_dataset/generate_actor_responses_minimal.py \
+            --checkpoint_dir "$model_path" \
+            --dataset_path "$dataset_path" \
+            --output_path "$shard_output" \
+            --prompt_key prompt \
+            --start_index "$shard_start" \
+            --max_examples "$shard_count" \
+            --seed "$seed" \
+            --max_prompt_length "$max_prompt_length" \
+            --max_new_tokens "$max_new_tokens" \
+            --batch_size "$batch_size" \
+            --generation_max_batch_tokens "$generation_max_batch_tokens" \
+            --response_log_max "$response_log_max" \
+            --temperature "$temperature" \
+            --top_p "$top_p" \
+            --top_k "$top_k" \
+            --dtype "${TRANSFORMERS_DTYPE:-bf16}" \
+            --device cuda:0
+        if [ "$use_cache" = "1" ]; then
+            set -- "$@" --use_cache
+        fi
+        if [ "$trust_remote_code" = "1" ]; then
+            set -- "$@" --trust_remote_code
+        fi
+        if [ "$skip_merge" = "1" ]; then
+            set -- "$@" --skip_merge
+        fi
+    else
+        echo "GENERATION_BACKEND must be 'vllm' or 'transformers'; got $generation_backend" >&2
+        exit 2
+    fi
 
     if [ -n "$response_key" ]; then
         set -- "$@" --response_key "$response_key"
@@ -67,14 +131,14 @@ run_generation_shard() {
     if [ -n "$reward_score_dir" ]; then
         set -- "$@" --reward_score_dir "$reward_score_dir"
     fi
-    if [ "$trust_remote_code" = "1" ]; then
-        set -- "$@" --trust_remote_code
-    fi
-    if [ "$skip_merge" = "1" ]; then
-        set -- "$@" --skip_merge
-    fi
 
-    echo "[collect][shard $shard_id] gpu=$shard_device start=$shard_start count=$shard_count output=$shard_output"
+    echo "[collect][shard $shard_id] backend=$generation_backend gpu=$shard_device start=$shard_start count=$shard_count output=$shard_output"
+    if [ "$dry_run" = "1" ]; then
+        printf '[collect][shard %s] command:' "$shard_id"
+        printf ' %s' "CUDA_VISIBLE_DEVICES=$shard_device" "$python_bin" "$@"
+        printf '\n'
+        return 0
+    fi
     CUDA_VISIBLE_DEVICES="$shard_device" "$python_bin" "$@"
 }
 
@@ -88,8 +152,12 @@ if [ "$max_examples" -lt 0 ]; then
     echo "Parallel sharding requires MAX_EXAMPLES >= 0; got $max_examples" >&2
     exit 2
 fi
+if [ "$batch_size" -lt 1 ]; then
+    echo "BATCH_SIZE must be >= 1; got $batch_size" >&2
+    exit 2
+fi
 
-rm -f "$raw_jsonl" "$all_trajectories_jsonl" "$all_trajectories_parquet" "$shard_dir"/raw_actor_responses_shard_*.jsonl "$shard_dir"/shard_*.log
+rm -f "$raw_jsonl" "$all_trajectories_jsonl" "$all_trajectories_parquet" "$shard_dir"/raw_actor_responses_shard_*.jsonl "$shard_dir"/metrics_shard_*.json "$shard_dir"/shard_*.log
 base_count=$((max_examples / num_shards))
 remainder=$((max_examples % num_shards))
 shard_index=0
@@ -108,11 +176,20 @@ for gpu_id in $devices; do
         fi
         shard_output="$shard_dir/raw_actor_responses_shard_${shard_index}.jsonl"
         shard_log="$shard_dir/shard_${shard_index}.log"
-        run_generation_shard "$shard_index" "$shard_start" "$shard_count" "$gpu_id" "$shard_output" >"$shard_log" 2>&1 &
-        pids="$pids $!"
+        if [ "$dry_run" = "1" ]; then
+            run_generation_shard "$shard_index" "$shard_start" "$shard_count" "$gpu_id" "$shard_output"
+        else
+            run_generation_shard "$shard_index" "$shard_start" "$shard_count" "$gpu_id" "$shard_output" >"$shard_log" 2>&1 &
+            pids="$pids $!"
+        fi
     fi
     shard_index=$((shard_index + 1))
 done
+
+if [ "$dry_run" = "1" ]; then
+    echo "[collect] dry run complete; no generation launched."
+    exit 0
+fi
 
 progress_bar() {
     current="$1"
@@ -210,7 +287,7 @@ from pathlib import Path
 import pandas as pd
 from transformers import AutoTokenizer
 
-from downstream_eval.generate_actor_responses_minimal import resolve_actor_hf_dir
+from create_calibration_dataset.generate_actor_responses_minimal import resolve_actor_hf_dir
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", required=True)

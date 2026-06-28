@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import os
 import random
-import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +15,27 @@ from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+
+from task_scoring import (
+    MATH_DATA_SOURCES,
+    compute_score_with_reward_module as shared_compute_score_with_reward_module,
+    extract_data_source,
+    extract_ground_truth,
+    extract_math_answer,
+    extract_prompt_value,
+    is_missing,
+    load_reward_module,
+    normalize_math_answer,
+    normalize_prompt,
+    reward_module_path,
+    scalarize_score,
+)
+
 
 DEFAULT_DATASET = "ShuoZheLi/MetaMathQA-math-500"
 DEFAULT_OUTPUT = None
@@ -26,7 +45,6 @@ METAMATHQA_MATH_500_ALIASES = {
     "metamathqa_math_500",
     "math_500",
 }
-MATH_DATA_SOURCES = {"lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500", "math_500"}
 METAMATHQA_MATH_500_TEST_FILE = "test.parquet"
 
 
@@ -66,57 +84,8 @@ def _model_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
-def normalize_prompt(prompt: Any, tokenizer) -> str:
-    if isinstance(prompt, np.ndarray):
-        prompt = prompt.tolist()
-    if isinstance(prompt, str):
-        return prompt
-    if isinstance(prompt, dict):
-        if "messages" in prompt:
-            return normalize_prompt(prompt["messages"], tokenizer)
-        for key in ("prompt", "text", "content"):
-            if key in prompt:
-                return str(prompt[key])
-        return json.dumps(prompt, ensure_ascii=True)
-    if isinstance(prompt, list):
-        if not prompt:
-            return ""
-        if all(isinstance(item, dict) for item in prompt) and hasattr(tokenizer, "apply_chat_template"):
-            try:
-                return tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
-            except Exception:
-                pass
-        if all(isinstance(item, dict) for item in prompt):
-            return "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in prompt)
-        if all(isinstance(item, str) for item in prompt):
-            return "\n".join(prompt)
-        return "\n".join(str(item) for item in prompt)
-    return str(prompt)
-
-
 def _is_missing(value: Any) -> bool:
-    try:
-        result = pd.isna(value)
-    except Exception:
-        return False
-    if isinstance(result, (bool, np.bool_)):
-        return bool(result)
-    return False
-
-
-def extract_ground_truth(row: pd.Series, response_key: str | None) -> Any:
-    if response_key and response_key in row and not _is_missing(row[response_key]):
-        return row[response_key]
-
-    reward_model = row.get("reward_model")
-    if isinstance(reward_model, dict):
-        return reward_model.get("ground_truth")
-
-    for key in ("ground_truth", "answer", "solution", "response"):
-        if key in row and not _is_missing(row[key]):
-            return row[key]
-
-    return None
+    return is_missing(value)
 
 
 def _resolve_dataset_name(path: str | Path) -> str:
@@ -157,20 +126,12 @@ def _load_dataframe(path: str | Path) -> pd.DataFrame:
 
 
 def _extract_prompt_value(row: pd.Series, prompt_key: str) -> Any:
-    if prompt_key in row and not _is_missing(row[prompt_key]):
-        return row[prompt_key]
-    for key in ("prompt", "query", "problem", "question", "original_question"):
-        if key in row and not _is_missing(row[key]):
-            return row[key]
-    raise KeyError(f"Cannot find prompt column. Requested {prompt_key!r}; available columns: {list(row.index)}")
+    return extract_prompt_value(row, prompt_key)
 
 
 def _extract_data_source(row: pd.Series, dataset_path: str | Path) -> str:
-    data_source = row.get("data_source", "")
-    data_source = "" if _is_missing(data_source) else str(data_source)
-    if not data_source and str(dataset_path) in METAMATHQA_MATH_500_ALIASES:
-        return "math_500"
-    return data_source
+    data_source = extract_data_source(row, dataset_path)
+    return data_source or ("math_500" if str(dataset_path) in METAMATHQA_MATH_500_ALIASES else "")
 
 
 def load_examples(
@@ -208,82 +169,25 @@ def load_examples(
 
 
 def _reward_module_path(module_name: str, reward_score_dir: str | Path | None = None) -> Path:
-    if reward_score_dir is not None:
-        return Path(reward_score_dir).expanduser() / f"{module_name}.py"
-    if os.environ.get("VERL_REWARD_SCORE_DIR"):
-        return Path(os.environ["VERL_REWARD_SCORE_DIR"]).expanduser() / f"{module_name}.py"
-
-    here = Path(__file__).resolve()
-    candidates = [
-        here.parents[1] / "verl" / "utils" / "reward_score" / f"{module_name}.py",
-        here.parents[2] / "verl" / "utils" / "reward_score" / f"{module_name}.py",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
-    return candidates[-1]
+    return reward_module_path(module_name, reward_score_dir)
 
 
 def _load_reward_module(module_name: str, reward_score_dir: str | Path | None = None):
-    module_path = _reward_module_path(module_name, reward_score_dir)
-    if not module_path.is_file():
-        raise FileNotFoundError(f"Reward module not found: {module_path}")
-    spec = importlib.util.spec_from_file_location(f"_task_accuracy_reward_{module_name}", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load reward module from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_reward_module(module_name, reward_score_dir)
 
 
-def _last_braced_content(text: str, marker: str) -> str | None:
-    start = text.rfind(marker)
-    if start < 0:
-        return None
-    index = start + len(marker)
-    if index >= len(text) or text[index] != "{":
-        return None
-
-    depth = 0
-    for pos in range(index, len(text)):
-        char = text[pos]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[index + 1:pos]
-    return None
+def _extract_math_answer(text: Any) -> str | None:
+    return extract_math_answer(text)
 
 
-def _extract_math_answer(text: Any) -> str:
-    text = "" if text is None else str(text)
-    boxed = _last_braced_content(text, "\\boxed")
-    if boxed is not None:
-        return boxed
-
-    matches = re.findall(r"(?:final answer|answer is|answer:)\s*([^\n\.]+)", text, flags=re.IGNORECASE)
-    if matches:
-        return matches[-1]
-    return text.strip().splitlines()[-1] if text.strip() else ""
-
-
-def _normalize_math_answer(answer: Any) -> str:
-    answer = _extract_math_answer(answer)
-    answer = answer.strip().strip("$").strip()
-    answer = answer.replace("\\left", "").replace("\\right", "")
-    answer = answer.replace("\\!", "").replace("\\,", "").replace("\\;", "")
-    answer = re.sub(r"\\text\{([^{}]*)\}", r"\1", answer)
-    answer = re.sub(r"\\mathrm\{([^{}]*)\}", r"\1", answer)
-    answer = answer.replace(",", "")
-    answer = re.sub(r"\s+", "", answer)
-    return answer.lower()
+def _normalize_math_answer(answer: Any) -> str | None:
+    return normalize_math_answer(answer)
 
 
 def _fallback_math_score(response_text: str, ground_truth: Any) -> float:
-    prediction = _normalize_math_answer(response_text)
-    target = _normalize_math_answer(ground_truth)
-    return float(bool(prediction) and prediction == target)
+    from task_scoring import fallback_math_score
+
+    return fallback_math_score(response_text, ground_truth)
 
 
 def compute_score_with_reward_module(
@@ -292,23 +196,7 @@ def compute_score_with_reward_module(
     ground_truth: Any,
     reward_score_dir: str | Path | None = None,
 ) -> Any:
-    if data_source == "openai/gsm8k":
-        return _load_reward_module("gsm8k", reward_score_dir).compute_score(response_text, ground_truth)
-    if data_source in MATH_DATA_SOURCES:
-        try:
-            return _load_reward_module("math_reward", reward_score_dir).compute_score(response_text, ground_truth)
-        except FileNotFoundError:
-            return _fallback_math_score(response_text, ground_truth)
-    if data_source in {"math_dapo", "math", "math_dapo_reasoning"} or data_source.startswith("aime"):
-        try:
-            return _load_reward_module("math_dapo", reward_score_dir).compute_score(
-                response_text,
-                ground_truth,
-                incorrect_reward=0.0,
-            )
-        except FileNotFoundError:
-            return _fallback_math_score(response_text, ground_truth)
-    raise NotImplementedError(f"Reward function is not implemented for data_source={data_source!r}")
+    return shared_compute_score_with_reward_module(data_source, response_text, ground_truth, reward_score_dir=reward_score_dir)
 
 
 def score_response(
@@ -322,12 +210,7 @@ def score_response(
         example.ground_truth,
         reward_score_dir=reward_score_dir,
     )
-    if isinstance(score, dict):
-        for key in ("score", "reward", "accuracy", "acc"):
-            if key in score:
-                return float(score[key])
-        raise ValueError(f"Cannot scalarize score dictionary: {score}")
-    return float(score)
+    return scalarize_score(score)
 
 
 def _sampling_kwargs(args: argparse.Namespace | DownstreamEvalConfig) -> dict[str, Any]:
