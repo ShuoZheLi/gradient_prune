@@ -64,6 +64,7 @@ class CalibrationCEConfig:
     dtype: str = "auto"
     enforce_eager: bool = True
     trust_remote_code: bool = False
+    shared_vllm: bool = True
     max_length: int | None = None
     text_key: str | None = None
     prompt_key: str | None = None

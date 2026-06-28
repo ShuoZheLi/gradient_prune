@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+export PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}"
 
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}

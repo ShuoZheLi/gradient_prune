@@ -382,6 +382,8 @@ def _cleanup_eval_model_checkpoint(eval_model_path: Path | None) -> None:
 
 
 def _can_use_shared_vllm_evaluator(config) -> bool:
+    if not getattr(config.calibration_ce, "shared_vllm", True):
+        return False
     if not _all_enabled_evals_use_vllm(config):
         return False
     base = _shared_vllm_base_config(config)

@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from calibration_loaders import CalibrationExample
-from evaluate_accuracy import _dataframe_to_accuracy_examples, _split_round_robin, _worker_cuda_visible_devices, _write_accuracy_outputs, score_task_response
+from evaluate_accuracy import _dataframe_to_accuracy_examples, _prepare_vllm_worker_environment, _split_round_robin, _worker_cuda_visible_devices, _write_accuracy_outputs, score_task_response
 from evaluate_ce import _ce_metrics, _nll_from_prompt_logprobs, _prepare_vllm_ce_example
 
 
@@ -223,8 +223,7 @@ def _run_shared_vllm_worker(
     max_model_len: int,
     seed: int,
 ):
-    if gpu_ids is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids)
+    _prepare_vllm_worker_environment(gpu_ids)
     try:
         from vllm import LLM, SamplingParams
     except ImportError as exc:

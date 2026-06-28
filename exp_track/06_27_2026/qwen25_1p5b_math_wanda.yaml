@@ -49,6 +49,7 @@ calibration_ce:
   dtype: auto
   enforce_eager: true
   trust_remote_code: true
+  shared_vllm: false
   max_length: 2048
 
 heldout_ce:

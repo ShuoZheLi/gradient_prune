@@ -285,6 +285,32 @@ def _worker_cuda_visible_devices(worker_id: int) -> str:
     return devices[worker_id]
 
 
+def _prepare_vllm_worker_environment(gpu_ids: str | None) -> None:
+    if gpu_ids is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids)
+    for key in (
+        "LOCAL_RANK",
+        "RANK",
+        "GROUP_RANK",
+        "ROLE_RANK",
+        "ROLE_NAME",
+        "LOCAL_WORLD_SIZE",
+        "WORLD_SIZE",
+        "GROUP_WORLD_SIZE",
+        "ROLE_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "TORCHELASTIC_RUN_ID",
+    ):
+        os.environ.pop(key, None)
+    os.environ["VLLM_HOST_IP"] = "127.0.0.1"
+    os.environ["VLLM_DP_MASTER_IP"] = "127.0.0.1"
+    os.environ["VLLM_USE_V1"] = "0"
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6")
+
+
 def _vllm_worker_entrypoint(progress_queue, **kwargs):
     try:
         rows = _run_vllm_worker(progress_queue=progress_queue, **kwargs)
@@ -315,8 +341,7 @@ def _run_vllm_worker(
     reward_score_dir: str | Path | None,
     progress_queue=None,
 ) -> list[dict[str, Any]]:
-    if gpu_ids is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids)
+    _prepare_vllm_worker_environment(gpu_ids)
     try:
         from vllm import LLM, SamplingParams
     except ImportError as exc:
