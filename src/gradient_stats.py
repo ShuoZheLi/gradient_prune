@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
 
 from calibration_loaders import load_calibration_examples, make_calibration_dataloader
@@ -22,9 +23,16 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
         LOGGER.warning("Collecting microbatch empirical Fisher approximation; h depends on microbatch_size.")
     else:
         LOGGER.warning("Collecting per-example empirical Fisher; h is independent of microbatch grouping but requires one backward per example.")
+    rank, world_size = _distributed_rank_and_world_size()
     if device is None:
         device = str(next(model.parameters()).device)
     examples = load_calibration_examples(calibration_path, calibration_type=calibration_type, only_correct=only_correct, max_samples=max_calibration_samples, shuffle=False, seed=seed)
+    total_examples = len(examples)
+    if world_size > 1 and fisher_estimator == "per_example":
+        examples = examples[rank::world_size]
+        LOGGER.info("Rank %d/%d collecting per-example gradient stats on %d/%d calibration examples", rank, world_size, len(examples), total_examples)
+    elif world_size > 1:
+        LOGGER.info("Rank %d/%d collecting every %d-th microbatch from %d calibration examples", rank, world_size, world_size, total_examples)
     dataloader = make_calibration_dataloader(examples, tokenizer, max_length=max_length, loss_on=loss_on, microbatch_size=microbatch_size)
     modules = dict(iter_prunable_modules(model, prune_ops))
     grad_sum = {name: torch.zeros_like(module.weight, dtype=torch.float32, device="cpu") for name, module in modules.items()}
@@ -33,7 +41,9 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
     model.train(False)
     model.zero_grad(set_to_none=True)
     with temporarily_disable_cache(model):
-        for batch in tqdm(dataloader, desc=f"gradient stats ({fisher_estimator})"):
+        for batch_index, batch in enumerate(tqdm(dataloader, desc=f"gradient stats ({fisher_estimator})")):
+            if world_size > 1 and fisher_estimator == "microbatch" and batch_index % world_size != rank:
+                continue
             batch = {key: value.to(device) for key, value in batch.items()}
             if fisher_estimator == "microbatch":
                 outputs = model(**batch)
@@ -46,11 +56,34 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
                     outputs.loss.backward()
                     count += 1
                     _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum)
-    stats = {name: {"g": grad_sum[name] / max(count, 1), "h": grad_sq_sum[name] / max(count, 1), "count": torch.tensor(count)} for name in modules}
-    if output_dir is not None:
+    total_count = _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, count)
+    stats = {name: {"g": grad_sum[name] / max(total_count, 1), "h": grad_sq_sum[name] / max(total_count, 1), "count": torch.tensor(total_count)} for name in modules}
+    if output_dir is not None and _is_main_process():
         note = "microbatch empirical Fisher approximation" if fisher_estimator == "microbatch" else "per-example empirical Fisher"
-        save_gradient_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": len(examples), "loss_on": loss_on, "microbatch_size": microbatch_size, "fisher_estimator": fisher_estimator, "gradient_accumulation_steps": gradient_accumulation_steps, "prune_ops": prune_ops, "dtype": dtype, "seed": seed, "note": note})
+        save_gradient_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": total_examples, "loss_on": loss_on, "microbatch_size": microbatch_size, "fisher_estimator": fisher_estimator, "gradient_accumulation_steps": gradient_accumulation_steps, "prune_ops": prune_ops, "dtype": dtype, "seed": seed, "distributed_world_size": world_size, "note": note})
     return stats
+
+
+def _distributed_rank_and_world_size() -> tuple[int, int]:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank(), dist.get_world_size()
+    return 0, 1
+
+
+def _is_main_process() -> bool:
+    rank, _ = _distributed_rank_and_world_size()
+    return rank == 0
+
+
+def _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, count: int) -> int:
+    if not (dist.is_available() and dist.is_initialized()):
+        return count
+    count_tensor = torch.tensor([count], dtype=torch.long)
+    dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+    for name in modules:
+        dist.all_reduce(grad_sum[name], op=dist.ReduceOp.SUM)
+        dist.all_reduce(grad_sq_sum[name], op=dist.ReduceOp.SUM)
+    return int(count_tensor.item())
 
 
 def _iter_single_examples(batch: dict[str, torch.Tensor]):

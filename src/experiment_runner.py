@@ -7,12 +7,14 @@ import csv
 import gc
 import json
 import logging
+import os
 import random
 import shutil
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from activation_stats import collect_activation_stats
 from apply_pruning import apply_masks, build_masks_for_model, load_masks, save_masks, save_pruned_model
@@ -44,19 +46,54 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def _init_distributed_from_torchrun() -> bool:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False
+    if dist.is_initialized():
+        return True
+    if torch.cuda.is_available() and "LOCAL_RANK" in os.environ:
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group(backend="gloo", init_method="env://")
+    LOGGER.info("Initialized distributed calibration rank %d/%d", dist.get_rank(), dist.get_world_size())
+    return True
+
+
+def _distributed_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+
+def _cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
+def _clear_torchrun_env() -> None:
+    for key in ("LOCAL_RANK", "RANK", "GROUP_RANK", "ROLE_RANK", "ROLE_NAME", "LOCAL_WORLD_SIZE", "WORLD_SIZE", "GROUP_WORLD_SIZE", "ROLE_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "TORCHELASTIC_RUN_ID"):
+        os.environ.pop(key, None)
+
+
 def run_experiment(config_path: str | Path):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = load_config(config_path)
+    distributed = _init_distributed_from_torchrun()
+    if distributed and torch.cuda.is_available():
+        config.model.device = f"cuda:{int(os.environ['LOCAL_RANK'])}"
     set_seed(config.seed)
+    rank = _distributed_rank()
     root = Path(config.output.root_dir)
     results_dir = root / "tables"
     stats_dir = root / "stats"
     masks_root = root / "masks"
     scores_dir = _resolve_scores_dir(config, root)
-    results_dir.mkdir(parents=True, exist_ok=True)
-    if not config.pruning.load_scores:
-        scores_dir.mkdir(parents=True, exist_ok=True)
-    save_config(config, root / "config.yaml")
+    if rank == 0:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if not config.pruning.load_scores:
+            scores_dir.mkdir(parents=True, exist_ok=True)
+        save_config(config, root / "config.yaml")
 
     model, tokenizer = load_model_and_tokenizer(config.model.model_name_or_path, config.model.dtype, config.model.device, config.model.trust_remote_code)
     methods = list(config.methods)
@@ -69,6 +106,11 @@ def run_experiment(config_path: str | Path):
         gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, fisher_estimator=config.calibration.fisher_estimator, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path)
     if need_act:
         activation_stats = collect_activation_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "activations" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on="full_trajectory", max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path)
+    if rank != 0:
+        _cleanup_distributed()
+        return
+    _cleanup_distributed()
+    _clear_torchrun_env()
     _save_representative_scores(model, gradient_stats, scores_dir, config.pruning.prune_ops)
 
     rows = []

@@ -13,9 +13,9 @@ fi
 export CUDA_VISIBLE_DEVICES
 
 torchrun --standalone --nproc_per_node "$NUM_GPUS" -m experiment_runner \
-  --config configs/qwen25_1p5b_math.yaml
+  --config exp_track/06_27_2026/qwen25_1p5b_math_wanda.yaml
 
 python -m plotting \
-  --results_csv results/qwen25_1p5b_signed_taylor_math/tables/main_results.csv \
-  --output_dir results/qwen25_1p5b_signed_taylor_math/plots \
-  --score_dir results/qwen25_1p5b_signed_taylor_math/scores
+  --results_csv results/qwen25_1p5b_wanda_math/tables/main_results.csv \
+  --output_dir results/qwen25_1p5b_wanda_math/plots \
+  --score_dir results/qwen25_1p5b_wanda_math/scores
