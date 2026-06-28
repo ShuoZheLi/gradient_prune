@@ -105,7 +105,7 @@ task_accuracy:
   trust_remote_code: true
 
 output:
-  root_dir: results/qwen25_1p5b_wanda_math
+  root_dir: results/qwen25_1p5b_wanda_math500
   save_stats: true
   save_masks: true
   save_plots: true
