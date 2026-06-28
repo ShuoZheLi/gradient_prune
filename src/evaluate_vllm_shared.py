@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from calibration_loaders import CalibrationExample
-from evaluate_accuracy import _dataframe_to_accuracy_examples, _prepare_vllm_worker_environment, _split_round_robin, _worker_cuda_visible_devices, _write_accuracy_outputs, score_task_response
+from evaluate_accuracy import _dataframe_to_accuracy_examples, _prepare_vllm_worker_environment, _split_round_robin, _temporary_vllm_worker_parent_environment, _worker_cuda_visible_devices, _write_accuracy_outputs, score_task_response
 from evaluate_ce import _ce_metrics, _nll_from_prompt_logprobs, _prepare_vllm_ce_example
 
 
@@ -44,13 +44,14 @@ class SharedVLLMEvaluator:
         self.processes = []
         for worker_id in range(self.worker_count):
             request_queue = self.ctx.Queue()
+            gpu_ids = _worker_cuda_visible_devices(worker_id) if self.worker_count > 1 else None
             process = self.ctx.Process(
                 target=_shared_vllm_worker_entrypoint,
                 kwargs={
                     "request_queue": request_queue,
                     "response_queue": self.response_queue,
                     "worker_id": worker_id,
-                    "gpu_ids": _worker_cuda_visible_devices(worker_id) if self.worker_count > 1 else None,
+                    "gpu_ids": gpu_ids,
                     "model_path": self.model_path,
                     "tensor_parallel_size": self.tensor_parallel_size,
                     "gpu_memory_utilization": gpu_memory_utilization,
@@ -61,7 +62,8 @@ class SharedVLLMEvaluator:
                     "seed": seed + worker_id,
                 },
             )
-            process.start()
+            with _temporary_vllm_worker_parent_environment(gpu_ids):
+                process.start()
             self.request_queues.append(request_queue)
             self.processes.append(process)
         self.closed = False

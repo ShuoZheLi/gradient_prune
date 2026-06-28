@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing as mp
 import os
@@ -165,28 +166,6 @@ def _evaluate_vllm(*args, **kwargs):
         return _write_accuracy_outputs([], output_jsonl, metrics_json)
     worker_count = min(max(int(data_parallel_size), 1), len(examples))
     tensor_parallel_size = max(int(tensor_parallel_size), 1)
-    if worker_count == 1:
-        rows = _run_vllm_worker(
-            worker_id=0,
-            gpu_ids=None,
-            model_path=str(model_path),
-            examples=examples,
-            max_prompt_length=max_prompt_length,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            seed=seed,
-            batch_size=batch_size_from_kwargs(kwargs),
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=gpu_memory_utilization,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            trust_remote_code=trust_remote_code,
-            reward_score_dir=reward_score_dir,
-        )
-        return _write_accuracy_outputs(rows, output_jsonl, metrics_json)
-
     if tensor_parallel_size != 1:
         raise ValueError("For data-parallel vLLM evaluation, set tensor_parallel_size: 1 so each worker uses one GPU")
     available_gpus = torch.cuda.device_count()
@@ -198,13 +177,13 @@ def _evaluate_vllm(*args, **kwargs):
     progress_queue = ctx.Queue()
     processes = []
     for worker_id, shard in enumerate(shards):
-        gpu_id = _worker_cuda_visible_devices(worker_id)
+        gpu_ids = _worker_cuda_visible_devices(worker_id)
         process = ctx.Process(
             target=_vllm_worker_entrypoint,
             kwargs={
                 "progress_queue": progress_queue,
                 "worker_id": worker_id,
-                "gpu_ids": gpu_id,
+                "gpu_ids": gpu_ids,
                 "model_path": str(model_path),
                 "examples": shard,
                 "max_prompt_length": max_prompt_length,
@@ -222,7 +201,8 @@ def _evaluate_vllm(*args, **kwargs):
                 "reward_score_dir": reward_score_dir,
             },
         )
-        process.start()
+        with _temporary_vllm_worker_parent_environment(gpu_ids):
+            process.start()
         processes.append(process)
 
     rows = []
@@ -285,6 +265,50 @@ def _worker_cuda_visible_devices(worker_id: int) -> str:
     return devices[worker_id]
 
 
+@contextlib.contextmanager
+def _temporary_vllm_worker_parent_environment(gpu_ids: str | None):
+    updates = {
+        "VLLM_HOST_IP": "127.0.0.1",
+        "VLLM_DP_MASTER_IP": "127.0.0.1",
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        "TORCH_CUDA_ARCH_LIST": os.environ.get("TORCH_CUDA_ARCH_LIST", "8.6"),
+    }
+    if gpu_ids is not None:
+        updates["CUDA_VISIBLE_DEVICES"] = str(gpu_ids)
+    remove_keys = (
+        "LOCAL_RANK",
+        "RANK",
+        "GROUP_RANK",
+        "ROLE_RANK",
+        "ROLE_NAME",
+        "LOCAL_WORLD_SIZE",
+        "WORLD_SIZE",
+        "GROUP_WORLD_SIZE",
+        "ROLE_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_ERROR_FILE",
+        "TORCHELASTIC_RESTART_COUNT",
+        "TORCHELASTIC_MAX_RESTARTS",
+        "TORCHELASTIC_USE_AGENT_STORE",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+    )
+    old_values = {key: os.environ.get(key) for key in set(updates) | set(remove_keys)}
+    try:
+        for key in remove_keys:
+            os.environ.pop(key, None)
+        os.environ.update(updates)
+        yield
+    finally:
+        for key, value in old_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _prepare_vllm_worker_environment(gpu_ids: str | None) -> None:
     if gpu_ids is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids)
@@ -301,11 +325,15 @@ def _prepare_vllm_worker_environment(gpu_ids: str | None) -> None:
         "MASTER_ADDR",
         "MASTER_PORT",
         "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_ERROR_FILE",
+        "TORCHELASTIC_RESTART_COUNT",
+        "TORCHELASTIC_MAX_RESTARTS",
+        "TORCHELASTIC_USE_AGENT_STORE",
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING",
     ):
         os.environ.pop(key, None)
     os.environ["VLLM_HOST_IP"] = "127.0.0.1"
     os.environ["VLLM_DP_MASTER_IP"] = "127.0.0.1"
-    os.environ["VLLM_USE_V1"] = "0"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
     os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6")

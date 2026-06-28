@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from calibration_loaders import CalibrationExample, load_calibration_examples, make_calibration_dataloader
-from evaluate_accuracy import _prepare_vllm_worker_environment, _split_round_robin
+from evaluate_accuracy import _prepare_vllm_worker_environment, _split_round_robin, _temporary_vllm_worker_parent_environment
 from model_utils import temporarily_disable_cache
 
 
@@ -84,23 +84,6 @@ def evaluate_ce_vllm_examples(
         return _ce_metrics(0.0, 0, 0)
     worker_count = min(max(int(data_parallel_size), 1), len(examples))
     tensor_parallel_size = max(int(tensor_parallel_size), 1)
-    if worker_count == 1:
-        total_nll, total_tokens, total_examples = _run_vllm_ce_worker(
-            worker_id=0,
-            gpu_ids=None,
-            model_path=str(model_path),
-            examples=examples,
-            loss_on=loss_on,
-            max_length=max_length,
-            batch_size=batch_size,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=gpu_memory_utilization,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            trust_remote_code=trust_remote_code,
-            seed=seed,
-        )
-        return _ce_metrics(total_nll, total_tokens, total_examples)
     if tensor_parallel_size != 1:
         raise ValueError("For data-parallel vLLM CE, set tensor_parallel_size: 1 so each worker uses one GPU")
     available_gpus = torch.cuda.device_count()
@@ -112,12 +95,13 @@ def evaluate_ce_vllm_examples(
     progress_queue = ctx.Queue()
     processes = []
     for worker_id, shard in enumerate(shards):
+        gpu_ids = _worker_cuda_visible_devices(worker_id)
         process = ctx.Process(
             target=_vllm_ce_worker_entrypoint,
             kwargs={
                 "progress_queue": progress_queue,
                 "worker_id": worker_id,
-                "gpu_ids": _worker_cuda_visible_devices(worker_id),
+                "gpu_ids": gpu_ids,
                 "model_path": str(model_path),
                 "examples": shard,
                 "loss_on": loss_on,
@@ -131,7 +115,8 @@ def evaluate_ce_vllm_examples(
                 "seed": seed + worker_id,
             },
         )
-        process.start()
+        with _temporary_vllm_worker_parent_environment(gpu_ids):
+            process.start()
         processes.append(process)
     total_nll = 0.0
     total_tokens = 0

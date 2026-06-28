@@ -1,4 +1,4 @@
-experiment_name: qwen25_1p5b_wanda_math
+experiment_name: qwen25_1p5b_signed_taylor_math
 seed: 42
 
 model:
@@ -14,11 +14,11 @@ pruning:
   save_pruned_models: false
   load_masks: false
   load_scores: false
-  score_root: /data/shuozhe/gradient_prune/results/qwen25_1p5b_wanda_math/scores
+  score_root: /data/shuozhe/gradient_prune/results/qwen25_1p5b_signed_taylor_math/scores
 
 # methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
 
-methods: [wanda]
+methods: [signed_taylor]
 
 hybrid:
   lambda_values: [0.1]
@@ -43,13 +43,12 @@ calibration_ce:
   loss_on: response_only
   max_samples: 500
   batch_size: 32
-  data_parallel_size: 3
+  data_parallel_size: 4
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
   enforce_eager: true
   trust_remote_code: true
-  shared_vllm: false
   max_length: 2048
 
 heldout_ce:
@@ -59,7 +58,7 @@ heldout_ce:
   loss_on: response_only
   max_samples: 256
   batch_size: 32
-  data_parallel_size: 3
+  data_parallel_size: 4
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
@@ -76,7 +75,7 @@ text_ppl:
   text_key: text
   max_samples: 256
   batch_size: 32
-  data_parallel_size: 3
+  data_parallel_size: 4
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
@@ -98,7 +97,7 @@ task_accuracy:
   top_p: 1.0
   top_k: 0
   batch_size: 32
-  data_parallel_size: 3
+  data_parallel_size: 4
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
@@ -106,7 +105,7 @@ task_accuracy:
   trust_remote_code: true
 
 output:
-  root_dir: results/qwen25_1p5b_wanda_math7500
+  root_dir: results/qwen25_1p5b_signed_taylor_math
   save_stats: true
   save_masks: true
   save_plots: true

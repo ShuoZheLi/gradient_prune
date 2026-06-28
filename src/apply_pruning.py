@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 
 import torch
 
@@ -56,8 +57,31 @@ def save_masks(masks: dict[str, torch.Tensor], output_dir: str | Path, metadata:
 def save_pruned_model(model, tokenizer, output_dir: str | Path) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(output_dir)
+    old_use_cache = getattr(model.config, "use_cache", None)
+    old_torch_dtype = getattr(model.config, "torch_dtype", None)
+    old_dtype = getattr(model.config, "dtype", None)
+    if old_use_cache is not None:
+        model.config.use_cache = True
+    if old_torch_dtype is None and old_dtype is not None:
+        model.config.torch_dtype = old_dtype
+    try:
+        model.save_pretrained(output_dir)
+    finally:
+        if old_use_cache is not None:
+            model.config.use_cache = old_use_cache
+        if old_torch_dtype is None and hasattr(model.config, "torch_dtype"):
+            model.config.torch_dtype = old_torch_dtype
+    _copy_original_config_if_available(model, output_dir)
     tokenizer.save_pretrained(output_dir)
+
+
+def _copy_original_config_if_available(model, output_dir: Path) -> None:
+    source = getattr(model.config, "_name_or_path", None)
+    if not source:
+        return
+    source_config = Path(source) / "config.json"
+    if source_config.is_file():
+        shutil.copy2(source_config, output_dir / "config.json")
 
 
 def load_masks(mask_dir: str | Path) -> dict[str, torch.Tensor]:
