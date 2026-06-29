@@ -36,6 +36,7 @@ GRAD_METHODS = {"gradient_norm", "signed_first_order", "signed_taylor", "hybrid_
 ACT_METHODS = {"wanda", "hybrid_wanda_signed_taylor"}
 SAVED_SCORE_METHODS = {"signed_first_order", "signed_taylor"}
 WEIGHT_ONLY_METHODS = {"dense", "magnitude"}
+LAMBDA_METHODS = {"hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion"}
 
 
 def set_seed(seed: int):
@@ -116,7 +117,7 @@ def run_experiment(config_path: str | Path):
     rows = []
     dense_accuracy = None
     for method in methods:
-        lambda_values = config.hybrid.lambda_values if method == "hybrid_wanda_signed_taylor" else [None]
+        lambda_values = config.hybrid.lambda_values if method in LAMBDA_METHODS else [None]
         for lambda_value in lambda_values:
             for sparsity in config.pruning.sparsities:
                 if method == "dense" and float(sparsity) != 0.0:
