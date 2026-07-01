@@ -122,6 +122,7 @@ class TaskAccuracyConfig:
     max_prompt_length: int = 2048
     max_new_tokens: int = 2048
     temperature: float = 0.0
+    do_sample: bool | None = None
     top_p: float = 1.0
     top_k: int = 0
     batch_size: int = 1

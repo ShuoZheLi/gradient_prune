@@ -32,11 +32,11 @@ from pruning_scores import signed_first_order_score, signed_taylor_score
 
 LOGGER = logging.getLogger(__name__)
 RESULT_COLUMNS = ["model_name", "calibration_type", "calibration_path", "loss_on", "method", "sparsity", "lambda_value", "calibration_ce", "heldout_ce", "wikitext_ppl", "task_accuracy", "accuracy_drop", "generalization_gap", "num_pruned_weights", "num_total_prunable_weights", "actual_sparsity", "seed", "notes"]
-GRAD_METHODS = {"gradient_norm", "signed_first_order", "signed_taylor", "hybrid_wanda_signed_taylor"}
-ACT_METHODS = {"wanda", "hybrid_wanda_signed_taylor"}
+GRAD_METHODS = {"gradient_norm", "signed_first_order", "signed_taylor", "hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
+ACT_METHODS = {"wanda", "hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
 SAVED_SCORE_METHODS = {"signed_first_order", "signed_taylor"}
 WEIGHT_ONLY_METHODS = {"dense", "magnitude"}
-LAMBDA_METHODS = {"hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion"}
+LAMBDA_METHODS = {"hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
 
 
 def set_seed(seed: int):
@@ -104,9 +104,9 @@ def run_experiment(config_path: str | Path):
     gradient_stats = None
     activation_stats = None
     if need_grad:
-        gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, fisher_estimator=config.calibration.fisher_estimator, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path)
+        gradient_stats = collect_gradient_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "gradients" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, fisher_estimator=config.calibration.fisher_estimator, loss_on=config.calibration.loss_on, max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, dtype=config.model.dtype, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path, shuffle=config.calibration.shuffle)
     if need_act:
-        activation_stats = collect_activation_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "activations" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on="full_trajectory", max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path)
+        activation_stats = collect_activation_stats(model, tokenizer, calibration_path=config.calibration.path, output_dir=stats_dir / "activations" if config.output.save_stats else None, calibration_type=config.calibration.type, only_correct=config.calibration.only_correct, max_calibration_samples=config.calibration.max_samples, microbatch_size=config.calibration.microbatch_size, loss_on="full_trajectory", max_length=config.calibration.max_length, device=config.model.device, prune_ops=config.pruning.prune_ops, seed=getattr(config, "seed", 42), model_name=config.model.model_name_or_path, shuffle=config.calibration.shuffle)
     if rank != 0:
         _cleanup_distributed()
         return
@@ -114,13 +114,18 @@ def run_experiment(config_path: str | Path):
     _clear_torchrun_env()
     _save_representative_scores(model, gradient_stats, scores_dir, config.pruning.prune_ops)
 
-    rows = []
-    dense_accuracy = None
+    rows = _read_existing_results(results_dir)
+    completed_conditions = {_condition_key(row.get("method"), row.get("sparsity"), row.get("lambda_value")) for row in rows}
+    dense_accuracy = next((row.get("task_accuracy") for row in rows if row.get("method") == "dense" and float(row.get("sparsity", 0.0)) == 0.0), None)
     for method in methods:
         lambda_values = config.hybrid.lambda_values if method in LAMBDA_METHODS else [None]
         for lambda_value in lambda_values:
             for sparsity in config.pruning.sparsities:
                 if method == "dense" and float(sparsity) != 0.0:
+                    continue
+                condition_key = _condition_key(method, sparsity, lambda_value)
+                if condition_key in completed_conditions:
+                    LOGGER.info("Skipping completed method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
                     continue
                 LOGGER.info("Running method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
                 run_model = model if method == "dense" and float(sparsity) == 0.0 else copy.deepcopy(model)
@@ -267,6 +272,7 @@ def _evaluate_all_shared_vllm(config, root: Path, method: str, sparsity: float, 
                 max_prompt_length=config.task_accuracy.max_prompt_length,
                 max_new_tokens=config.task_accuracy.max_new_tokens,
                 temperature=config.task_accuracy.temperature,
+                do_sample=config.task_accuracy.do_sample,
                 top_p=config.task_accuracy.top_p,
                 top_k=config.task_accuracy.top_k,
                 batch_size=config.task_accuracy.batch_size,
@@ -344,6 +350,7 @@ def _evaluate_all_impl(model, tokenizer, config, root: Path, method: str, sparsi
                 config.task_accuracy.max_prompt_length,
                 config.task_accuracy.max_new_tokens,
                 config.task_accuracy.temperature,
+                config.task_accuracy.do_sample,
                 config.task_accuracy.top_p,
                 config.task_accuracy.top_k,
                 config.task_accuracy.batch_size,
@@ -614,6 +621,33 @@ def _save_representative_scores(model, gradient_stats, scores_dir: Path, prune_o
 
 def _diff(a, b):
     return None if a is None or b is None else a - b
+
+
+def _read_existing_results(results_dir: Path):
+    csv_path = results_dir / "main_results.csv"
+    if not csv_path.is_file():
+        return []
+    with open(csv_path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        for key in ("sparsity", "lambda_value", "calibration_ce", "heldout_ce", "wikitext_ppl", "task_accuracy", "accuracy_drop", "generalization_gap", "actual_sparsity"):
+            if row.get(key) not in (None, "", "None"):
+                try:
+                    row[key] = float(row[key])
+                except ValueError:
+                    pass
+        for key in ("num_pruned_weights", "num_total_prunable_weights", "seed"):
+            if row.get(key) not in (None, "", "None"):
+                try:
+                    row[key] = int(float(row[key]))
+                except ValueError:
+                    pass
+    return rows
+
+
+def _condition_key(method, sparsity, lambda_value):
+    lambda_key = "none" if lambda_value in (None, "", "None") else str(float(lambda_value))
+    return (str(method), str(float(sparsity)), lambda_key)
 
 
 def _write_results(rows, results_dir: Path):

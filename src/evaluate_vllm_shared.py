@@ -111,7 +111,8 @@ class SharedVLLMEvaluator:
         max_prompt_length: int,
         max_new_tokens: int,
         temperature: float,
-        top_p: float,
+        do_sample: bool | None = None,
+        top_p: float = 1.0,
         top_k: int,
         batch_size: int,
         reward_score_dir: str | Path | None = None,
@@ -129,6 +130,7 @@ class SharedVLLMEvaluator:
                     "max_prompt_length": max_prompt_length,
                     "max_new_tokens": max_new_tokens,
                     "temperature": temperature,
+                    "do_sample": do_sample,
                     "top_p": top_p,
                     "top_k": top_k,
                     "batch_size": batch_size,
@@ -266,6 +268,7 @@ def _run_shared_vllm_worker(
                     max_prompt_length=request["max_prompt_length"],
                     max_new_tokens=request["max_new_tokens"],
                     temperature=request["temperature"],
+                    do_sample=request.get("do_sample"),
                     top_p=request["top_p"],
                     top_k=request["top_k"],
                     batch_size=request["batch_size"],
@@ -302,10 +305,11 @@ def _run_loaded_llm_ce_job(*, llm, tokenizer, examples, loss_on, max_length, bat
     return total_nll, total_tokens, total_examples
 
 
-def _run_loaded_llm_accuracy_job(*, llm, examples, max_prompt_length, max_new_tokens, temperature, top_p, top_k, batch_size, reward_score_dir, seed, response_queue):
+def _run_loaded_llm_accuracy_job(*, llm, examples, max_prompt_length, max_new_tokens, temperature, do_sample=None, top_p=1.0, top_k=0, batch_size=1, reward_score_dir=None, seed=42, response_queue=None):
     from vllm import SamplingParams
 
-    sampling_kwargs = {"max_tokens": max_new_tokens, "temperature": temperature, "top_p": top_p, "seed": seed}
+    sampling_temperature = temperature if (bool(temperature and temperature > 0) if do_sample is None else bool(do_sample)) else 0.0
+    sampling_kwargs = {"max_tokens": max_new_tokens, "temperature": sampling_temperature, "top_p": top_p, "seed": seed}
     if top_k and top_k > 0:
         sampling_kwargs["top_k"] = top_k
     sampling = SamplingParams(**sampling_kwargs)

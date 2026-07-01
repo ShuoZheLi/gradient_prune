@@ -15,11 +15,11 @@ from model_utils import temporarily_disable_cache
 LOGGER = logging.getLogger(__name__)
 
 
-def collect_activation_stats(model, tokenizer, *, calibration_path: str, output_dir: str | Path | None = None, calibration_type: str = "prompt_response", only_correct: bool = False, max_calibration_samples: int | None = None, microbatch_size: int = 1, loss_on: str = "full_trajectory", max_length: int = 4096, device: str | None = None, prune_ops=None, seed: int = 42, model_name: str = "") -> dict[str, torch.Tensor]:
+def collect_activation_stats(model, tokenizer, *, calibration_path: str, output_dir: str | Path | None = None, calibration_type: str = "prompt_response", only_correct: bool = False, max_calibration_samples: int | None = None, microbatch_size: int = 1, loss_on: str = "full_trajectory", max_length: int = 4096, device: str | None = None, prune_ops=None, seed: int = 42, model_name: str = "", shuffle: bool = False) -> dict[str, torch.Tensor]:
     if device is None:
         device = str(next(model.parameters()).device)
     rank, world_size = _distributed_rank_and_world_size()
-    examples = load_calibration_examples(calibration_path, calibration_type=calibration_type, only_correct=only_correct, max_samples=max_calibration_samples, shuffle=False, seed=seed)
+    examples = load_calibration_examples(calibration_path, calibration_type=calibration_type, only_correct=only_correct, max_samples=max_calibration_samples, shuffle=shuffle, seed=seed)
     total_examples = len(examples)
     if world_size > 1:
         examples = examples[rank::world_size]
@@ -47,15 +47,23 @@ def collect_activation_stats(model, tokenizer, *, calibration_path: str, output_
         with torch.no_grad(), temporarily_disable_cache(model):
             for batch in tqdm(dataloader, desc="activation stats"):
                 batch = {key: value.to(device) for key, value in batch.items()}
-                model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+                _forward_without_lm_head(model, input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
     finally:
         for handle in handles:
             handle.remove()
     _reduce_activation_sums(modules, sq_sums, counts)
     stats = {name: (sq_sums[name] / max(counts[name], 1)).sqrt().float() for name in modules}
     if output_dir is not None and _is_main_process():
-        save_activation_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": total_examples, "loss_on": loss_on, "microbatch_size": microbatch_size, "prune_ops": prune_ops, "seed": seed, "distributed_world_size": world_size, "definition": "sqrt(mean over observed tokens of x_j^2)"})
+        save_activation_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": total_examples, "loss_on": loss_on, "microbatch_size": microbatch_size, "prune_ops": prune_ops, "seed": seed, "shuffle": shuffle, "distributed_world_size": world_size, "definition": "sqrt(mean over observed tokens of x_j^2)"})
     return stats
+
+
+def _forward_without_lm_head(model, *, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> None:
+    base_model = getattr(model, "model", None)
+    if base_model is not None:
+        base_model(input_ids=input_ids, attention_mask=attention_mask)
+    else:
+        model(input_ids=input_ids, attention_mask=attention_mask)
 
 
 def _distributed_rank_and_world_size() -> tuple[int, int]:

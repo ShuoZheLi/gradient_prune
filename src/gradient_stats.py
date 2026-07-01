@@ -15,7 +15,7 @@ from model_utils import temporarily_disable_cache
 LOGGER = logging.getLogger(__name__)
 
 
-def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_dir: str | Path | None = None, calibration_type: str = "prompt_response", only_correct: bool = False, max_calibration_samples: int | None = None, microbatch_size: int = 1, gradient_accumulation_steps: int = 1, loss_on: str = "response_only", max_length: int = 4096, device: str | None = None, prune_ops=None, dtype: str = "bf16", seed: int = 42, model_name: str = "", fisher_estimator: str = "microbatch") -> dict[str, dict[str, torch.Tensor]]:
+def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_dir: str | Path | None = None, calibration_type: str = "prompt_response", only_correct: bool = False, max_calibration_samples: int | None = None, microbatch_size: int = 1, gradient_accumulation_steps: int = 1, loss_on: str = "response_only", max_length: int = 4096, device: str | None = None, prune_ops=None, dtype: str = "bf16", seed: int = 42, model_name: str = "", fisher_estimator: str = "microbatch", shuffle: bool = False) -> dict[str, dict[str, torch.Tensor]]:
     fisher_estimator = str(fisher_estimator).lower()
     if fisher_estimator not in {"microbatch", "per_example"}:
         raise ValueError(f"Unsupported fisher_estimator={fisher_estimator!r}; use 'microbatch' or 'per_example'")
@@ -26,7 +26,7 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
     rank, world_size = _distributed_rank_and_world_size()
     if device is None:
         device = str(next(model.parameters()).device)
-    examples = load_calibration_examples(calibration_path, calibration_type=calibration_type, only_correct=only_correct, max_samples=max_calibration_samples, shuffle=False, seed=seed)
+    examples = load_calibration_examples(calibration_path, calibration_type=calibration_type, only_correct=only_correct, max_samples=max_calibration_samples, shuffle=shuffle, seed=seed)
     total_examples = len(examples)
     if world_size > 1 and fisher_estimator == "per_example":
         examples = examples[rank::world_size]
@@ -37,6 +37,7 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
     modules = dict(iter_prunable_modules(model, prune_ops))
     grad_sum = {name: torch.zeros_like(module.weight, dtype=torch.float32, device="cpu") for name, module in modules.items()}
     grad_sq_sum = {name: torch.zeros_like(module.weight, dtype=torch.float32, device="cpu") for name, module in modules.items()}
+    grad_abs_sum = {name: torch.zeros_like(module.weight, dtype=torch.float32, device="cpu") for name, module in modules.items()}
     count = 0
     model.train(False)
     model.zero_grad(set_to_none=True)
@@ -49,18 +50,20 @@ def collect_gradient_stats(model, tokenizer, *, calibration_path: str, output_di
                 outputs = model(**batch)
                 outputs.loss.backward()
                 count += 1
-                _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum)
+                _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum, grad_abs_sum)
             else:
                 for example_batch in _iter_single_examples(batch):
                     outputs = model(**example_batch)
                     outputs.loss.backward()
                     count += 1
-                    _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum)
-    total_count = _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, count)
-    stats = {name: {"g": grad_sum[name] / max(total_count, 1), "h": grad_sq_sum[name] / max(total_count, 1), "count": torch.tensor(total_count)} for name in modules}
+                    _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum, grad_abs_sum)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    total_count = _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, grad_abs_sum, count)
+    stats = {name: {"g": grad_sum[name] / max(total_count, 1), "h": grad_sq_sum[name] / max(total_count, 1), "abs_g": grad_abs_sum[name] / max(total_count, 1), "count": torch.tensor(total_count)} for name in modules}
     if output_dir is not None and _is_main_process():
         note = "microbatch empirical Fisher approximation" if fisher_estimator == "microbatch" else "per-example empirical Fisher"
-        save_gradient_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": total_examples, "loss_on": loss_on, "microbatch_size": microbatch_size, "fisher_estimator": fisher_estimator, "gradient_accumulation_steps": gradient_accumulation_steps, "prune_ops": prune_ops, "dtype": dtype, "seed": seed, "distributed_world_size": world_size, "note": note})
+        save_gradient_stats(stats, output_dir, metadata={"model_name": model_name, "calibration_path": calibration_path, "number_of_examples": total_examples, "loss_on": loss_on, "microbatch_size": microbatch_size, "fisher_estimator": fisher_estimator, "gradient_accumulation_steps": gradient_accumulation_steps, "prune_ops": prune_ops, "dtype": dtype, "seed": seed, "shuffle": shuffle, "distributed_world_size": world_size, "note": note})
     return stats
 
 
@@ -75,7 +78,7 @@ def _is_main_process() -> bool:
     return rank == 0
 
 
-def _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, count: int) -> int:
+def _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, grad_abs_sum, count: int) -> int:
     if not (dist.is_available() and dist.is_initialized()):
         return count
     count_tensor = torch.tensor([count], dtype=torch.long)
@@ -83,6 +86,7 @@ def _reduce_gradient_sums(modules, grad_sum, grad_sq_sum, count: int) -> int:
     for name in modules:
         dist.all_reduce(grad_sum[name], op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_sq_sum[name], op=dist.ReduceOp.SUM)
+        dist.all_reduce(grad_abs_sum[name], op=dist.ReduceOp.SUM)
     return int(count_tensor.item())
 
 
@@ -93,7 +97,7 @@ def _iter_single_examples(batch: dict[str, torch.Tensor]):
         yield {key: value[idx : idx + 1] for key, value in batch.items()}
 
 
-def _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum):
+def _accumulate_and_zero(model, modules, grad_sum, grad_sq_sum, grad_abs_sum):
     for name, module in modules.items():
         if module.weight.grad is None:
             continue

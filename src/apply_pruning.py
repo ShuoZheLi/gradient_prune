@@ -23,6 +23,7 @@ def build_masks_for_model(model, *, method: str, sparsity: float, prune_ops=None
             module.weight.detach().cpu(),
             g=grad_entry.get("g") if grad_entry else None,
             h=grad_entry.get("h") if grad_entry else None,
+            abs_g=grad_entry.get("abs_g") if grad_entry else None,
             activation_norm=activation_stats.get(name) if activation_stats else None,
             lambda_value=lambda_value,
         )

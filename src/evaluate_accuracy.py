@@ -50,6 +50,7 @@ def evaluate_task_accuracy(
     max_prompt_length: int = 2048,
     max_new_tokens: int = 2048,
     temperature: float = 0.0,
+    do_sample: bool | None = None,
     top_p: float = 1.0,
     top_k: int = 0,
     batch_size: int = 1,
@@ -75,6 +76,7 @@ def evaluate_task_accuracy(
             max_prompt_length,
             max_new_tokens,
             temperature,
+            do_sample,
             top_p,
             top_k,
             seed,
@@ -108,9 +110,9 @@ def evaluate_task_accuracy(
         chunk = df.iloc[start : start + batch_size]
         prompts = [_extract_prompt(row, prompt_key, tokenizer) for _, row in chunk.iterrows()]
         encoded = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=max_prompt_length).to(device)
-        do_sample = temperature and temperature > 0
-        gen_kwargs = {"max_new_tokens": max_new_tokens, "do_sample": bool(do_sample), "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id}
-        if do_sample:
+        should_sample = bool(temperature and temperature > 0) if do_sample is None else bool(do_sample)
+        gen_kwargs = {"max_new_tokens": max_new_tokens, "do_sample": should_sample, "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id}
+        if should_sample:
             gen_kwargs.update({"temperature": temperature, "top_p": top_p})
             if top_k and top_k > 0:
                 gen_kwargs["top_k"] = top_k
@@ -140,6 +142,7 @@ def _evaluate_vllm(*args, **kwargs):
         max_prompt_length,
         max_new_tokens,
         temperature,
+        do_sample,
         top_p,
         top_k,
         seed,
@@ -189,6 +192,7 @@ def _evaluate_vllm(*args, **kwargs):
                 "max_prompt_length": max_prompt_length,
                 "max_new_tokens": max_new_tokens,
                 "temperature": temperature,
+                "do_sample": do_sample,
                 "top_p": top_p,
                 "top_k": top_k,
                 "seed": seed + worker_id,
@@ -357,6 +361,7 @@ def _run_vllm_worker(
     max_prompt_length: int,
     max_new_tokens: int,
     temperature: float,
+    do_sample: bool | None,
     top_p: float,
     top_k: int,
     seed: int,
@@ -383,7 +388,8 @@ def _run_vllm_worker(
         enforce_eager=bool(enforce_eager),
         max_model_len=max_prompt_length + max_new_tokens,
     )
-    sampling_kwargs = {"max_tokens": max_new_tokens, "temperature": temperature, "top_p": top_p, "seed": seed}
+    sampling_temperature = temperature if (bool(temperature and temperature > 0) if do_sample is None else bool(do_sample)) else 0.0
+    sampling_kwargs = {"max_tokens": max_new_tokens, "temperature": sampling_temperature, "top_p": top_p, "seed": seed}
     if top_k and top_k > 0:
         sampling_kwargs["top_k"] = top_k
     sampling = SamplingParams(**sampling_kwargs)
