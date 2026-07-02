@@ -26,7 +26,35 @@ if [[ -d "$VENV" ]]; then
   source "${VENV}/bin/activate"
 fi
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+find_repo_root() {
+  local start_dir="$1"
+  local dir
+  dir="$(CDPATH= cd -- "$start_dir" 2>/dev/null && pwd)" || return 1
+  while [[ "$dir" != "/" ]]; do
+    if [[ -f "$dir/pyproject.toml" && -d "$dir/create_calibration_dataset" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir="$(dirname -- "$dir")"
+  done
+  return 1
+}
+
+# Slurm may execute a spooled copy under /var/spool. Prefer explicit overrides,
+# then discover the repo by walking up from the submit/current/script directory.
+repo_root="${WORK_DIR:-${REPO_ROOT:-}}"
+if [[ -z "$repo_root" ]]; then
+  for candidate in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$(dirname -- "${BASH_SOURCE[0]}")" "/work2/09576/shuozhe/gradient_prune" "/data/shuozhe/gradient_prune"; do
+    [[ -z "$candidate" ]] && continue
+    if repo_root="$(find_repo_root "$candidate")"; then
+      break
+    fi
+  done
+fi
+if [[ -z "$repo_root" || ! -d "$repo_root" ]]; then
+  echo "Could not locate gradient_prune repo. Set WORK_DIR=/path/to/gradient_prune when submitting." >&2
+  exit 1
+fi
 cd "$repo_root"
 export PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 
