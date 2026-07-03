@@ -8,11 +8,42 @@ OUTPUT_DIR="$REPO_ROOT/results/06_30_2026/qwen3_8b_base_wanda_scores"
 LOG_DIR="$REPO_ROOT/exp_track/06_30_2026/logs"
 LOG_FILE="$LOG_DIR/qwen3_8b_base_wanda_scores.log"
 PID_FILE="$LOG_DIR/qwen3_8b_base_wanda_scores.pid"
-WORKER="$REPO_ROOT/exp_track/06_30_2026/worker_qwen3_8b_base_wanda_scores.sh"
 NUM_GPUS="${NUM_GPUS:-1}"
 MAX_LENGTH="${MAX_LENGTH:-4096}"
 MICROBATCH_SIZE="${MICROBATCH_SIZE:-1}"
 DTYPE="${DTYPE:-bf16}"
+
+run_worker() {
+  cd "$REPO_ROOT"
+  set +u
+  source /data/shuozhe/miniconda3/etc/profile.d/conda.sh
+  conda activate verl
+  set -u
+
+  export PYTHONUNBUFFERED=1
+  export TOKENIZERS_PARALLELISM=false
+  export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+
+  score_args=(scripts/score_wanda.py
+    --model "$MODEL_PATH"
+    --calibration "$CALIBRATION_PATH"
+    --output-dir "$OUTPUT_DIR"
+    --calibration-type prompt_response
+    --microbatch-size "$MICROBATCH_SIZE"
+    --max-length "$MAX_LENGTH"
+    --dtype "$DTYPE"
+  )
+
+  if [[ "$NUM_GPUS" -gt 1 ]]; then
+    exec torchrun --standalone --nnodes 1 --nproc-per-node "$NUM_GPUS" "${score_args[@]}"
+  fi
+
+  exec python "${score_args[@]}"
+}
+
+if [[ "${1:-}" == "--worker" ]]; then
+  run_worker
+fi
 
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 cd "$REPO_ROOT"
@@ -42,11 +73,11 @@ fi
   echo "Calibration: $CALIBRATION_PATH"
   echo "Output: $OUTPUT_DIR"
   echo "NUM_GPUS=$NUM_GPUS MAX_LENGTH=$MAX_LENGTH MICROBATCH_SIZE=$MICROBATCH_SIZE DTYPE=$DTYPE"
-  echo "Worker: $WORKER"
+  echo "Worker: $0 --worker"
 } >> "$LOG_FILE"
 
 NUM_GPUS="$NUM_GPUS" MAX_LENGTH="$MAX_LENGTH" MICROBATCH_SIZE="$MICROBATCH_SIZE" DTYPE="$DTYPE" \
-  nohup bash "$WORKER" >> "$LOG_FILE" 2>&1 &
+  nohup bash "$0" --worker >> "$LOG_FILE" 2>&1 &
 
 pid=$!
 echo "$pid" > "$PID_FILE"

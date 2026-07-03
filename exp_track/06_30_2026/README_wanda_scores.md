@@ -12,6 +12,9 @@ Run or resume launch:
 bash /data/shuozhe/gradient_prune/exp_track/06_30_2026/run_qwen3_8b_base_wanda_scores.sh
 ```
 
+The launch script starts itself in worker mode under `nohup`, records the PID,
+and writes logs to the experiment log file.
+
 Useful overrides:
 
 ```bash
