@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import importlib.util
 import json
 import os
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover - numpy is available in normal eval envs
 
 MATH_DATA_SOURCES = {"lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500", "math_500"}
 MATH_DAPO_DATA_SOURCES = {"math_dapo", "math", "math_dapo_reasoning"}
+VERL_SCORER_BACKENDS = {"verl_default", "verl_math_reward", "verl_math_verify", "legacy_modules", "fallback"}
 
 
 @dataclass(frozen=True)
@@ -97,8 +99,14 @@ def extract_data_source(row, dataset_path: str | Path | None = None) -> str:
     for key in ("data_source", "source", "dataset", "dataset_source"):
         if key in row and not is_missing(row[key]):
             return str(row[key])
-    if dataset_path is not None and str(dataset_path) in {"ShuoZheLi/MetaMathQA-math-500", "MetaMathQA-math-500", "metamathqa_math_500", "math_500"}:
-        return "math_500"
+    if dataset_path is not None:
+        path_str = str(dataset_path)
+        path_name = Path(path_str).name.lower()
+        path_parts = {part.lower() for part in Path(path_str).parts}
+        if path_str in {"ShuoZheLi/MetaMathQA-math-500", "MetaMathQA-math-500", "metamathqa_math_500", "math_500"}:
+            return "math_500"
+        if "metamathqa-math-500" in path_parts and path_name in {"test.parquet", "math7500.parquet"}:
+            return "math_500"
     return ""
 
 
@@ -261,6 +269,56 @@ def load_reward_module(module_name: str, reward_score_dir: str | Path | None = N
     return module
 
 
+def scorer_backend() -> str:
+    backend = os.environ.get("TASK_SCORER_BACKEND") or os.environ.get("MATH_SCORER") or "verl_math_reward"
+    backend = backend.strip().lower()
+    if backend == "verl_default":
+        backend = "verl_math_reward"
+    if backend not in VERL_SCORER_BACKENDS:
+        choices = ", ".join(sorted(VERL_SCORER_BACKENDS))
+        raise ValueError(f"Unsupported scorer backend {backend!r}. Choose one of: {choices}")
+    return backend
+
+
+def _import_verl_default_compute_score():
+    try:
+        module = importlib.import_module("verl.utils.reward_score")
+    except ImportError as exc:
+        raise ImportError(
+            "Unable to import verl.utils.reward_score. Activate the verl environment before collecting/scoring, "
+            "for example: source /data/shuozhe/miniconda3/etc/profile.d/conda.sh && conda activate verl. "
+            "Set TASK_SCORER_BACKEND=legacy_modules or fallback only if you intentionally do not want verl scoring."
+        ) from exc
+    return module.default_compute_score
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _compute_score_with_verl_default(data_source: str, response_text: str, ground_truth: Any) -> Any:
+    return _import_verl_default_compute_score()(
+        data_source,
+        response_text,
+        ground_truth,
+        math_dapo_binary_reward=_env_flag("MATH_DAPO_BINARY_REWARD", default=True),
+    )
+
+
+def _compute_score_with_verl_math_verify(response_text: str, ground_truth: Any) -> Any:
+    try:
+        module = importlib.import_module("verl.utils.reward_score.math_verify")
+    except ImportError as exc:
+        raise ImportError(
+            "Unable to import verl.utils.reward_score.math_verify. Activate the verl environment and ensure "
+            "math-verify is installed, or use TASK_SCORER_BACKEND=verl_default."
+        ) from exc
+    return module.compute_score(model_output=response_text, ground_truth=str(ground_truth))
+
+
 def scalarize_score(score: Any) -> float:
     if isinstance(score, dict):
         for key in ("score", "reward", "accuracy", "acc"):
@@ -270,7 +328,7 @@ def scalarize_score(score: Any) -> float:
     return float(score)
 
 
-def compute_score_with_reward_module(data_source: str, response_text: str, ground_truth: Any, reward_score_dir: str | Path | None = None) -> Any:
+def compute_score_with_legacy_reward_module(data_source: str, response_text: str, ground_truth: Any, reward_score_dir: str | Path | None = None) -> Any:
     if data_source == "openai/gsm8k":
         return load_reward_module("gsm8k", reward_score_dir).compute_score(response_text, ground_truth)
     if data_source in MATH_DATA_SOURCES:
@@ -283,6 +341,22 @@ def compute_score_with_reward_module(data_source: str, response_text: str, groun
             return load_reward_module("math_dapo", reward_score_dir).compute_score(response_text, ground_truth, incorrect_reward=0.0)
         except FileNotFoundError:
             return fallback_math_score(response_text, ground_truth)
+    return fallback_math_score(response_text, ground_truth)
+
+
+def compute_score_with_reward_module(data_source: str, response_text: str, ground_truth: Any, reward_score_dir: str | Path | None = None) -> Any:
+    if reward_score_dir is not None:
+        return compute_score_with_legacy_reward_module(data_source, response_text, ground_truth, reward_score_dir=reward_score_dir)
+
+    backend = scorer_backend()
+    if backend == "verl_math_reward":
+        return _compute_score_with_verl_default(data_source, response_text, ground_truth)
+    if backend == "verl_math_verify":
+        if data_source in MATH_DATA_SOURCES or data_source in MATH_DAPO_DATA_SOURCES or data_source.startswith("aime"):
+            return _compute_score_with_verl_math_verify(response_text, ground_truth)
+        return _compute_score_with_verl_default(data_source, response_text, ground_truth)
+    if backend == "legacy_modules":
+        return compute_score_with_legacy_reward_module(data_source, response_text, ground_truth)
     return fallback_math_score(response_text, ground_truth)
 
 

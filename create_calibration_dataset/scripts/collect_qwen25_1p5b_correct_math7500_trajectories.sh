@@ -5,6 +5,7 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$repo_root"
 
 python_bin="${PYTHON_BIN:-python}"
+export TASK_SCORER_BACKEND="${TASK_SCORER_BACKEND:-verl_math_reward}"
 model_path="${MODEL_PATH:-/data/shuozhe/saved_model/Qwen2.5-1.5B-Instruct}"
 dataset_path="${DATASET_PATH:-/data/shuozhe/saved_dataset/MetaMathQA-math-500/math7500.parquet}"
 output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen2.5-1.5b-instruct_math7500_correct}"
