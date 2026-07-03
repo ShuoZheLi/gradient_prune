@@ -217,12 +217,17 @@ def score_response(
 
 
 def _sampling_kwargs(args: argparse.Namespace | DownstreamEvalConfig) -> dict[str, Any]:
-    do_sample = args.temperature > 0
+    n = max(1, int(getattr(args, "num_responses_per_prompt", 1)))
+    temperature = float(args.temperature)
+    if n > 1 and temperature <= 0:
+        temperature = float(getattr(args, "multi_response_temperature", 0.7))
+        print(f"[vllm] NUM_RESPONSES_PER_PROMPT={n} requires sampling; overriding temperature to {temperature}")
+    do_sample = temperature > 0
     kwargs = {
-        "temperature": float(args.temperature) if do_sample else 0.0,
+        "temperature": temperature if do_sample else 0.0,
         "top_p": float(args.top_p),
         "max_tokens": int(args.max_new_tokens),
-        "n": max(1, int(getattr(args, "num_responses_per_prompt", 1))),
+        "n": n,
     }
     top_k = int(getattr(args, "top_k", 0))
     if top_k > 0:
@@ -654,6 +659,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_k", type=int, default=0)
     parser.add_argument("--response_log_max", type=int, default=-1, help="Maximum responses to write; -1 writes all.")
     parser.add_argument("--num-responses-per-prompt", type=int, default=1, help="Generate this many sampled responses for each prompt. Only vLLM supports values > 1.")
+    parser.add_argument("--multi-response-temperature", type=float, default=0.7, help="Fallback temperature when num responses > 1 but temperature <= 0.")
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--trust_remote_code", action="store_true")

@@ -126,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_k", type=int, default=0)
     parser.add_argument("--response_log_max", type=int, default=-1)
     parser.add_argument("--num-responses-per-prompt", type=int, default=1, help="Generate this many sampled responses for each prompt.")
+    parser.add_argument("--multi-response-temperature", type=float, default=0.7, help="Fallback temperature when num responses > 1 but temperature <= 0.")
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--dtype", default="auto")
@@ -164,11 +165,16 @@ def _generation_microbatches(examples: list[ExampleRecord], tokenizer, args: arg
 
 def _sampling_params(args: argparse.Namespace):
     from vllm import SamplingParams
+    n = max(1, int(args.num_responses_per_prompt))
+    temperature = float(args.temperature)
+    if n > 1 and temperature <= 0:
+        temperature = float(getattr(args, "multi_response_temperature", 0.7))
+        print(f"[vllm] NUM_RESPONSES_PER_PROMPT={n} requires sampling; overriding temperature to {temperature}")
     kwargs = {
-        "temperature": float(args.temperature) if args.temperature > 0 else 0.0,
+        "temperature": temperature if temperature > 0 else 0.0,
         "top_p": float(args.top_p),
         "max_tokens": int(args.max_new_tokens),
-        "n": max(1, int(args.num_responses_per_prompt)),
+        "n": n,
     }
     if int(args.top_k) > 0:
         kwargs["top_k"] = int(args.top_k)
