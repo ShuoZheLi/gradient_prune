@@ -69,6 +69,7 @@ class DownstreamEvalConfig:
     top_p: float = 1.0
     top_k: int = 0
     response_log_max: int = -1
+    num_responses_per_prompt: int = 1
     backend: str = "transformers"
     model_path: str | None = None
     tensor_parallel_size: int = 1
@@ -221,6 +222,7 @@ def _sampling_kwargs(args: argparse.Namespace | DownstreamEvalConfig) -> dict[st
         "temperature": float(args.temperature) if do_sample else 0.0,
         "top_p": float(args.top_p),
         "max_tokens": int(args.max_new_tokens),
+        "n": max(1, int(getattr(args, "num_responses_per_prompt", 1))),
     }
     top_k = int(getattr(args, "top_k", 0))
     if top_k > 0:
@@ -238,6 +240,8 @@ def _generation_kwargs(model, tokenizer, args: argparse.Namespace | DownstreamEv
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
+    if max(1, int(getattr(args, "num_responses_per_prompt", 1))) != 1:
+        raise ValueError("num_responses_per_prompt > 1 is only supported for vLLM generation backend")
     if do_sample:
         generation_kwargs["temperature"] = args.temperature
         generation_kwargs["top_p"] = args.top_p
@@ -345,6 +349,8 @@ def _score_generated_responses(
     logged_responses: int,
     reward_score_dir: str | Path | None = None,
     enable_thinking: str = "auto",
+    response_indices: list[int] | None = None,
+    num_responses_per_prompt: int = 1,
 ) -> tuple[list[float], list[bool], int, int]:
     scores: list[float] = []
     correct: list[bool] = []
@@ -352,14 +358,25 @@ def _score_generated_responses(
 
     if len(examples) != len(responses):
         raise ValueError(f"Response count mismatch: {len(responses)} responses for {len(examples)} examples")
+    if response_indices is None:
+        response_indices = [0] * len(responses)
+    if len(response_indices) != len(responses):
+        raise ValueError(f"Response index count mismatch: {len(response_indices)} indices for {len(responses)} responses")
 
-    for example, response in zip(examples, responses):
+    for example, response, response_index in zip(examples, responses, response_indices):
         row = None
         should_log_response = output_handle is not None and (
             response_log_max < 0 or logged_responses < response_log_max
         )
         if should_log_response:
-            row = {"example_id": example.example_id, "prompt": example.prompt_text, "response": response, "enable_thinking": enable_thinking}
+            row = {
+                "example_id": example.example_id,
+                "response_index": response_index,
+                "prompt": example.prompt_text,
+                "response": response,
+                "enable_thinking": enable_thinking,
+                "num_responses_per_prompt": max(1, int(num_responses_per_prompt)),
+            }
         if example.ground_truth is None:
             num_unscored += 1
             if row is not None:
@@ -400,13 +417,13 @@ def _metrics_from_scores(num_examples: int, scores: list[float], correct: list[b
     return metrics
 
 
-def _vllm_outputs_to_texts(outputs) -> list[str]:
+def _vllm_outputs_to_texts(outputs) -> list[list[str]]:
     texts = []
     for output in outputs:
         if not output.outputs:
-            texts.append("")
+            texts.append([""])
         else:
-            texts.append(output.outputs[0].text)
+            texts.append([item.text for item in output.outputs])
     return texts
 
 
@@ -458,15 +475,24 @@ def evaluate_vllm_task_accuracy(
             for batch_examples in _generation_microbatches(examples, tokenizer, args):
                 prompts = [example.prompt_text for example in batch_examples]
                 outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-                responses = _vllm_outputs_to_texts(outputs)
+                grouped_responses = _vllm_outputs_to_texts(outputs)
+                flat_examples = []
+                flat_responses = []
+                response_indices = []
+                for example, responses in zip(batch_examples, grouped_responses):
+                    for response_index, response in enumerate(responses):
+                        flat_examples.append(ExampleRecord(example.example_id, example.prompt_text, example.data_source, example.ground_truth))
+                        flat_responses.append(response)
+                        response_indices.append(response_index)
                 batch_scores, batch_correct, batch_unscored, logged_responses = _score_generated_responses(
-                    batch_examples,
-                    responses,
+                    flat_examples,
+                    flat_responses,
                     output_handle=output_handle,
                     response_log_max=response_log_max,
                     logged_responses=logged_responses,
                     reward_score_dir=reward_score_dir,
                     enable_thinking=getattr(args, "enable_thinking", "auto"),
+                    num_responses_per_prompt=max(1, int(getattr(args, "num_responses_per_prompt", 1))),
                 )
                 scores.extend(batch_scores)
                 correct.extend(batch_correct)
@@ -627,6 +653,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=0)
     parser.add_argument("--response_log_max", type=int, default=-1, help="Maximum responses to write; -1 writes all.")
+    parser.add_argument("--num-responses-per-prompt", type=int, default=1, help="Generate this many sampled responses for each prompt. Only vLLM supports values > 1.")
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--trust_remote_code", action="store_true")

@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=collect_qwen3_8b_math500
+#SBATCH --job-name=collect_qwen3_8b_math7500_n_5
 #SBATCH --account=ASC24079
 #SBATCH --partition=gh
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
-#SBATCH --time=4:00:00
-#SBATCH --output=slurm-%j_collect_qwen3_8b_math500.out
-#SBATCH --error=slurm-%j_collect_qwen3_8b_math500.err
+#SBATCH --time=8:00:00
+#SBATCH --output=slurm-%j_collect_qwen3_8b_math7500_n_5.out
+#SBATCH --error=slurm-%j_collect_qwen3_8b_math7500_n_5.err
 
 set -euo pipefail
 
@@ -70,7 +70,7 @@ export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${cache_root}/triton}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${cache_root}/xdg}"
 export TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${cache_root}/tiktoken}"
 export PYTHONUNBUFFERED=1
-export TASK_SCORER_BACKEND="${TASK_SCORER_BACKEND:-verl_default}"
+export TASK_SCORER_BACKEND="${TASK_SCORER_BACKEND:-verl_math_reward}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-true}"
 export VLLM_NO_USAGE_STATS=1
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
@@ -81,22 +81,22 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # -----------------------------
 # Paths and collection config
 # -----------------------------
-RUN_NAME="${RUN_NAME:-collect_qwen3_8b_math500}"
+RUN_NAME="${RUN_NAME:-collect_qwen3_8b_math7500_5_response}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
 
 model_path="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
-dataset_path="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
-output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen3-8b-instruct_math500_correct}"
+dataset_path="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/math7500.parquet}"
+output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response}"
 raw_jsonl="${RAW_JSONL:-$output_dir/raw_actor_responses.jsonl}"
 shard_dir="${SHARD_DIR:-$output_dir/shards}"
 log_dir="${LOG_DIR:-$output_dir/logs/${RUN_ID}}"
 all_trajectories_jsonl="${ALL_TRAJECTORIES_JSONL:-$output_dir/all_actor_trajectories.jsonl}"
 all_trajectories_parquet="${ALL_TRAJECTORIES_PARQUET:-$output_dir/all_actor_trajectories.parquet}"
 correct_jsonl="${CORRECT_JSONL:-$output_dir/correct_actor_responses.jsonl}"
-calib_parquet="${CALIB_PARQUET:-$output_dir/qwen3-8b-instruct_math500_correct.parquet}"
+calib_parquet="${CALIB_PARQUET:-$output_dir/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
 metrics_json="${METRICS_JSON:-$output_dir/metrics.json}"
 
-max_examples="${MAX_EXAMPLES:-500}"
+max_examples="${MAX_EXAMPLES:-7500}"
 start_index="${START_INDEX:-0}"
 seed="${SEED:-42}"
 max_prompt_length="${MAX_PROMPT_LENGTH:-2048}"
@@ -105,7 +105,7 @@ generation_backend="${GENERATION_BACKEND:-vllm}"
 batch_size="${BATCH_SIZE:-64}"
 generation_max_batch_tokens="${GENERATION_MAX_BATCH_TOKENS:-0}"
 response_log_max="${RESPONSE_LOG_MAX:--1}"
-num_responses_per_prompt="${NUM_RESPONSES_PER_PROMPT:-1}"
+num_responses_per_prompt="${NUM_RESPONSES_PER_PROMPT:-5}"
 use_cache="${USE_CACHE:-0}"
 temperature="${TEMPERATURE:-0.0}"
 top_p="${TOP_P:-1.0}"

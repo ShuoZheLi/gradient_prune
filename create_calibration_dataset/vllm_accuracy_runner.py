@@ -125,6 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=0)
     parser.add_argument("--response_log_max", type=int, default=-1)
+    parser.add_argument("--num-responses-per-prompt", type=int, default=1, help="Generate this many sampled responses for each prompt.")
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--dtype", default="auto")
@@ -167,6 +168,7 @@ def _sampling_params(args: argparse.Namespace):
         "temperature": float(args.temperature) if args.temperature > 0 else 0.0,
         "top_p": float(args.top_p),
         "max_tokens": int(args.max_new_tokens),
+        "n": max(1, int(args.num_responses_per_prompt)),
     }
     if int(args.top_k) > 0:
         kwargs["top_k"] = int(args.top_k)
@@ -227,27 +229,38 @@ def main() -> None:
             with tqdm(total=len(examples), desc="Evaluating") as progress:
                 for batch_examples in _generation_microbatches(examples, tokenizer, args):
                     outputs = llm.generate([example.prompt_text for example in batch_examples], sampling_params, use_tqdm=False)
-                    responses = [output.outputs[0].text if output.outputs else "" for output in outputs]
-                    for example, response in zip(batch_examples, responses):
-                        row = None
-                        if response_log_max < 0 or logged_responses < response_log_max:
-                            row = {"example_id": example.example_id, "prompt": example.prompt_text, "response": response, "enable_thinking": args.enable_thinking}
-                        if example.ground_truth is None:
-                            num_unscored += 1
+                    for example, output in zip(batch_examples, outputs):
+                        generated_outputs = output.outputs or []
+                        if not generated_outputs:
+                            generated_outputs = [None]
+                        for response_index, generated_output in enumerate(generated_outputs):
+                            response = generated_output.text if generated_output is not None else ""
+                            row = None
+                            if response_log_max < 0 or logged_responses < response_log_max:
+                                row = {
+                                    "example_id": example.example_id,
+                                    "response_index": response_index,
+                                    "prompt": example.prompt_text,
+                                    "response": response,
+                                    "enable_thinking": args.enable_thinking,
+                                    "num_responses_per_prompt": max(1, int(args.num_responses_per_prompt)),
+                                }
+                            if example.ground_truth is None:
+                                num_unscored += 1
+                                if row is not None:
+                                    row["task_score"] = None
+                            else:
+                                score = score_response(example, response, reward_score_dir=args.reward_score_dir)
+                                is_correct = bool(score == 1.0)
+                                scores.append(score)
+                                correct.append(is_correct)
+                                if row is not None:
+                                    row["task_score"] = score
+                                    row["is_correct"] = is_correct
                             if row is not None:
-                                row["task_score"] = None
-                        else:
-                            score = score_response(example, response, reward_score_dir=args.reward_score_dir)
-                            is_correct = bool(score == 1.0)
-                            scores.append(score)
-                            correct.append(is_correct)
-                            if row is not None:
-                                row["task_score"] = score
-                                row["is_correct"] = is_correct
-                        if row is not None:
-                            output_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-                            output_handle.flush()
-                            logged_responses += 1
+                                output_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                                output_handle.flush()
+                                logged_responses += 1
                     progress.update(len(batch_examples))
     finally:
         try:
@@ -256,12 +269,20 @@ def main() -> None:
             pass
         del llm
 
-    metrics = {"num_examples": len(examples), "num_scored": len(scores), "num_unscored": num_unscored}
+    metrics = {"num_examples": len(examples), "num_responses_per_prompt": max(1, int(args.num_responses_per_prompt)), "num_generations": len(scores) + num_unscored, "num_scored": len(scores), "num_unscored": num_unscored}
     if scores:
+        correct_array = np.array(correct, dtype=bool)
+        prompt_pass_count = 0
+        for start in range(0, len(correct_array), max(1, int(args.num_responses_per_prompt))):
+            if bool(np.any(correct_array[start:start + max(1, int(args.num_responses_per_prompt))])):
+                prompt_pass_count += 1
         metrics.update(
             {
                 "pass@1": float(np.mean(correct)),
                 "accuracy": float(np.mean(correct)),
+                "response_accuracy": float(np.mean(correct)),
+                "prompt_pass_rate": prompt_pass_count / len(examples) if examples else None,
+                "num_prompts_with_correct_response": int(prompt_pass_count),
                 "mean_score": float(np.mean(scores)),
                 "score_sum": float(np.sum(scores)),
                 "num_correct": int(np.sum(correct)),

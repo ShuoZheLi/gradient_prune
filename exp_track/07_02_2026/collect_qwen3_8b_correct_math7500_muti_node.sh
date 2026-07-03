@@ -105,6 +105,7 @@ generation_backend="${GENERATION_BACKEND:-vllm}"
 batch_size="${BATCH_SIZE:-64}"
 generation_max_batch_tokens="${GENERATION_MAX_BATCH_TOKENS:-0}"
 response_log_max="${RESPONSE_LOG_MAX:--1}"
+num_responses_per_prompt="${NUM_RESPONSES_PER_PROMPT:-1}"
 use_cache="${USE_CACHE:-0}"
 temperature="${TEMPERATURE:-0.0}"
 top_p="${TOP_P:-1.0}"
@@ -121,6 +122,16 @@ enable_thinking="${ENABLE_THINKING:-true}"
 skip_merge="${SKIP_MERGE:-1}"
 progress_interval="${PROGRESS_INTERVAL:-5}"
 dry_run="${DRY_RUN:-0}"
+
+if [[ "$num_responses_per_prompt" -lt 1 ]]; then
+  echo "NUM_RESPONSES_PER_PROMPT must be >= 1; got $num_responses_per_prompt" >&2
+  exit 2
+fi
+if [[ "$num_responses_per_prompt" -gt 1 && "$generation_backend" != "vllm" ]]; then
+  echo "NUM_RESPONSES_PER_PROMPT > 1 requires GENERATION_BACKEND=vllm; got $generation_backend" >&2
+  exit 2
+fi
+expected_raw_lines=$((max_examples * num_responses_per_prompt))
 
 mkdir -p "$output_dir" "$shard_dir" "$log_dir"
 
@@ -221,6 +232,7 @@ PYRESOLVE
       --batch_size "$batch_size"
       --generation_max_batch_tokens "$generation_max_batch_tokens"
       --response_log_max "$response_log_max"
+      --num-responses-per-prompt "$num_responses_per_prompt"
       --temperature "$temperature"
       --top_p "$top_p"
       --top_k "$top_k"
@@ -249,6 +261,7 @@ PYRESOLVE
       --batch_size "$batch_size"
       --generation_max_batch_tokens "$generation_max_batch_tokens"
       --response_log_max "$response_log_max"
+      --num-responses-per-prompt "$num_responses_per_prompt"
       --temperature "$temperature"
       --top_p "$top_p"
       --top_k "$top_k"
@@ -311,15 +324,15 @@ progress_count() {
       completed=$((completed + shard_lines))
     fi
   done
-  if [[ "$completed" -gt "$max_examples" ]]; then
-    completed="$max_examples"
+  if [[ "$completed" -gt "$expected_raw_lines" ]]; then
+    completed="$expected_raw_lines"
   fi
   printf '%s' "$completed"
 }
 
 progress_monitor() {
   while :; do
-    progress_bar "$(progress_count)" "$max_examples"
+    progress_bar "$(progress_count)" "$expected_raw_lines"
     sleep "$progress_interval"
   done
 }
@@ -346,7 +359,7 @@ echo "[collect] dataset_path=$dataset_path"
 echo "[collect] output_dir=$output_dir"
 echo "[collect] raw_jsonl=$raw_jsonl"
 echo "[collect] cache_root=$cache_root"
-echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache enable_thinking=$enable_thinking"
+echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache enable_thinking=$enable_thinking num_responses_per_prompt=$num_responses_per_prompt"
 echo "[collect] vllm tensor_parallel_size=$tensor_parallel_size gpu_memory_utilization=$gpu_memory_utilization enforce_eager=$enforce_eager"
 
 if [[ ! -d "$repo_root" ]]; then
@@ -388,7 +401,7 @@ for node in "${nodes_array[@]}"; do
       fi
       shard_output="$shard_dir/raw_actor_responses_shard_${shard_index}.jsonl"
       shard_log="$log_dir/shard_${shard_index}_${node}.log"
-      inner_cmd="cd $(printf '%q' "$repo_root") || exit 1; source $(printf '%q' "${VENV}/bin/activate") 2>/dev/null || true; $(declare -f run_generation_shard); python_bin=$(printf '%q' "$python_bin"); model_path=$(printf '%q' "$model_path"); dataset_path=$(printf '%q' "$dataset_path"); shard_dir=$(printf '%q' "$shard_dir"); generation_backend=$(printf '%q' "$generation_backend"); skip_merge=$(printf '%q' "$skip_merge"); seed=$(printf '%q' "$seed"); max_prompt_length=$(printf '%q' "$max_prompt_length"); max_new_tokens=$(printf '%q' "$max_new_tokens"); batch_size=$(printf '%q' "$batch_size"); generation_max_batch_tokens=$(printf '%q' "$generation_max_batch_tokens"); response_log_max=$(printf '%q' "$response_log_max"); temperature=$(printf '%q' "$temperature"); top_p=$(printf '%q' "$top_p"); top_k=$(printf '%q' "$top_k"); tensor_parallel_size=$(printf '%q' "$tensor_parallel_size"); gpu_memory_utilization=$(printf '%q' "$gpu_memory_utilization"); dtype=$(printf '%q' "$dtype"); enforce_eager=$(printf '%q' "$enforce_eager"); use_cache=$(printf '%q' "$use_cache"); trust_remote_code=$(printf '%q' "$trust_remote_code"); enable_thinking=$(printf '%q' "$enable_thinking"); response_key=$(printf '%q' "$response_key"); reward_score_dir=$(printf '%q' "$reward_score_dir"); dry_run=$(printf '%q' "$dry_run"); export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") VLLM_NO_USAGE_STATS=1 VLLM_WORKER_MULTIPROC_METHOD=$(printf '%q' "$VLLM_WORKER_MULTIPROC_METHOD") VLLM_USE_V1=$(printf '%q' "$VLLM_USE_V1"); run_generation_shard $(printf '%q' "$shard_index") $(printf '%q' "$shard_start") $(printf '%q' "$shard_count") $(printf '%q' "$gpu_id") $(printf '%q' "$shard_output")"
+      inner_cmd="cd $(printf '%q' "$repo_root") || exit 1; source $(printf '%q' "${VENV}/bin/activate") 2>/dev/null || true; $(declare -f run_generation_shard); python_bin=$(printf '%q' "$python_bin"); model_path=$(printf '%q' "$model_path"); dataset_path=$(printf '%q' "$dataset_path"); shard_dir=$(printf '%q' "$shard_dir"); generation_backend=$(printf '%q' "$generation_backend"); skip_merge=$(printf '%q' "$skip_merge"); seed=$(printf '%q' "$seed"); max_prompt_length=$(printf '%q' "$max_prompt_length"); max_new_tokens=$(printf '%q' "$max_new_tokens"); batch_size=$(printf '%q' "$batch_size"); generation_max_batch_tokens=$(printf '%q' "$generation_max_batch_tokens"); response_log_max=$(printf '%q' "$response_log_max"); num_responses_per_prompt=$(printf '%q' "$num_responses_per_prompt"); temperature=$(printf '%q' "$temperature"); top_p=$(printf '%q' "$top_p"); top_k=$(printf '%q' "$top_k"); tensor_parallel_size=$(printf '%q' "$tensor_parallel_size"); gpu_memory_utilization=$(printf '%q' "$gpu_memory_utilization"); dtype=$(printf '%q' "$dtype"); enforce_eager=$(printf '%q' "$enforce_eager"); use_cache=$(printf '%q' "$use_cache"); trust_remote_code=$(printf '%q' "$trust_remote_code"); enable_thinking=$(printf '%q' "$enable_thinking"); response_key=$(printf '%q' "$response_key"); reward_score_dir=$(printf '%q' "$reward_score_dir"); dry_run=$(printf '%q' "$dry_run"); export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") VLLM_NO_USAGE_STATS=1 VLLM_WORKER_MULTIPROC_METHOD=$(printf '%q' "$VLLM_WORKER_MULTIPROC_METHOD") VLLM_USE_V1=$(printf '%q' "$VLLM_USE_V1"); run_generation_shard $(printf '%q' "$shard_index") $(printf '%q' "$shard_start") $(printf '%q' "$shard_count") $(printf '%q' "$gpu_id") $(printf '%q' "$shard_output")"
       if [[ "$dry_run" == "1" ]]; then
         launch_on_node "$node" "$inner_cmd"
       else
@@ -416,7 +429,7 @@ for pid in "${pids[@]}"; do
 done
 cleanup
 progress_pid=""
-progress_bar "$(progress_count)" "$max_examples"
+progress_bar "$(progress_count)" "$expected_raw_lines"
 printf '\n'
 
 if [[ "$failed" -ne 0 ]]; then
@@ -435,8 +448,8 @@ done
 
 raw_lines=$(wc -l < "$raw_jsonl" | tr -d ' ')
 echo "[collect] merged raw responses: $raw_lines rows -> $raw_jsonl"
-if [[ "$raw_lines" -ne "$max_examples" ]]; then
-  echo "Expected $max_examples raw responses, got $raw_lines" >&2
+if [[ "$raw_lines" -ne "$expected_raw_lines" ]]; then
+  echo "Expected $expected_raw_lines raw responses ($max_examples prompts x $num_responses_per_prompt), got $raw_lines" >&2
   exit 1
 fi
 
@@ -449,7 +462,8 @@ fi
   --all_trajectories_parquet "$all_trajectories_parquet" \
   --correct_jsonl "$correct_jsonl" \
   --calib_parquet "$calib_parquet" \
-  --metrics_json "$metrics_json" <<'PY'
+  --metrics_json "$metrics_json" \
+  --num_responses_per_prompt "$num_responses_per_prompt" <<'PY'
 import argparse
 import json
 from pathlib import Path
@@ -469,6 +483,7 @@ parser.add_argument("--all_trajectories_parquet", required=True)
 parser.add_argument("--correct_jsonl", required=True)
 parser.add_argument("--calib_parquet", required=True)
 parser.add_argument("--metrics_json", required=True)
+parser.add_argument("--num_responses_per_prompt", type=int, default=1)
 args = parser.parse_args()
 
 raw_path = Path(args.raw_jsonl).expanduser()
@@ -493,6 +508,7 @@ if tokenizer.pad_token_id is None:
 
 all_rows = []
 correct_rows = []
+prompt_correct = {}
 num_total = 0
 num_scored = 0
 with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_path.open("w", encoding="utf-8") as all_file, correct_path.open("w", encoding="utf-8") as correct_file:
@@ -514,6 +530,8 @@ with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_path.open("w"
         )["input_ids"]
         out_row = {
             "example_id": row.get("example_id"),
+            "response_index": row.get("response_index", 0),
+            "num_responses_per_prompt": row.get("num_responses_per_prompt", args.num_responses_per_prompt),
             "prompt": prompt,
             "response": response,
             "task_score": row.get("task_score"),
@@ -524,6 +542,7 @@ with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_path.open("w"
         all_rows.append(out_row)
         all_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
         if out_row["is_correct"]:
+            prompt_correct[row.get("example_id")] = True
             correct_rows.append(out_row)
             correct_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
 
@@ -533,9 +552,14 @@ correct_df = pd.DataFrame(correct_rows)
 correct_df.to_parquet(parquet_path, index=False)
 metrics = {
     "num_total": num_total,
+    "num_prompts": len({row.get("example_id") for row in all_rows}),
+    "num_responses_per_prompt": args.num_responses_per_prompt,
+    "num_prompts_with_correct_response": sum(1 for value in prompt_correct.values() if value),
+    "prompt_pass_rate": (sum(1 for value in prompt_correct.values() if value) / len({row.get("example_id") for row in all_rows})) if all_rows else None,
     "num_scored": num_scored,
     "num_correct": len(correct_rows),
     "accuracy": (len(correct_rows) / num_scored) if num_scored else None,
+    "response_accuracy": (len(correct_rows) / num_scored) if num_scored else None,
     "raw_jsonl": str(raw_path),
     "all_trajectories_jsonl": str(all_jsonl_path),
     "all_trajectories_parquet": str(all_parquet_path),

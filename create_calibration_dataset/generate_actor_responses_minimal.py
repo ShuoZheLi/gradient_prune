@@ -93,6 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--generation_max_batch_tokens", type=int, default=32768, help="Cap prompt+generation tokens per generation microbatch. Use <=0 to disable.")
     parser.add_argument("--response_log_max", type=int, default=-1, help="Maximum responses to write; -1 writes all.")
+    parser.add_argument("--num-responses-per-prompt", type=int, default=1, help="Generate this many sampled responses for each prompt. Only vLLM supports values > 1.")
     parser.add_argument("--use_cache", action="store_true", help="Use generation KV cache. Faster but uses more GPU memory.")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=1.0)
