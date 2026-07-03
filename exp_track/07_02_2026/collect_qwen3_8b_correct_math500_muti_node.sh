@@ -70,7 +70,7 @@ export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${cache_root}/triton}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${cache_root}/xdg}"
 export TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${cache_root}/tiktoken}"
 export PYTHONUNBUFFERED=1
-export TASK_SCORER_BACKEND="${TASK_SCORER_BACKEND:-verl_math_reward}"
+export TASK_SCORER_BACKEND="${TASK_SCORER_BACKEND:-verl_default}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-true}"
 export VLLM_NO_USAGE_STATS=1
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
@@ -84,7 +84,7 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 RUN_NAME="${RUN_NAME:-collect_qwen3_8b_math500}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
 
-model_path="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
+model_path="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B-Base}"
 dataset_path="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
 output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen3-8b-instruct_math500_correct}"
 raw_jsonl="${RAW_JSONL:-$output_dir/raw_actor_responses.jsonl}"
