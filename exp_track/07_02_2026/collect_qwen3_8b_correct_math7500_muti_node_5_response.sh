@@ -2,7 +2,7 @@
 #SBATCH --job-name=collect_qwen3_8b_math7500_n_5
 #SBATCH --account=ASC24079
 #SBATCH --partition=gh
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
