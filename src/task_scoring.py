@@ -46,22 +46,58 @@ def is_missing(value: Any) -> bool:
     return bool(result) if isinstance(result, bool_types) else False
 
 
-def normalize_prompt(prompt: Any, tokenizer=None) -> str:
-    if isinstance(prompt, str) and prompt.strip().startswith(("[", "{")):
-        try:
-            parsed = ast.literal_eval(prompt)
-        except (SyntaxError, ValueError):
-            parsed = None
-        if parsed is not None:
-            return normalize_prompt(parsed, tokenizer)
+def normalize_enable_thinking(value: Any) -> str:
+    if value is None:
+        return "auto"
+    normalized = str(value).strip().lower()
+    aliases = {"1": "true", "yes": "true", "y": "true", "on": "true", "0": "false", "no": "false", "n": "false", "off": "false", "none": "auto", "default": "auto"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"auto", "true", "false"}:
+        raise ValueError(f"enable_thinking must be one of auto, true, false; got {value!r}")
+    return normalized
+
+
+def apply_chat_template_with_optional_thinking(tokenizer, messages, *, enable_thinking: str = "auto", add_generation_prompt: bool = True) -> str:
+    kwargs = {"tokenize": False, "add_generation_prompt": add_generation_prompt}
+    thinking_mode = normalize_enable_thinking(enable_thinking)
+    if thinking_mode != "auto":
+        kwargs["enable_thinking"] = thinking_mode == "true"
+    try:
+        return tokenizer.apply_chat_template(messages, **kwargs)
+    except TypeError:
+        if "enable_thinking" not in kwargs:
+            raise
+        kwargs.pop("enable_thinking", None)
+        return tokenizer.apply_chat_template(messages, **kwargs)
+
+
+
+def looks_like_rendered_chat_prompt(text: str) -> bool:
+    return any(marker in text for marker in ("<|im_start|>", "<|start_header_id|>", "[INST]", "<s>[INST]"))
+
+def normalize_prompt(prompt: Any, tokenizer=None, *, enable_thinking: str = "auto") -> str:
+    if isinstance(prompt, str):
+        stripped = prompt.strip()
+        if stripped.startswith(("[", "{")):
+            try:
+                parsed = ast.literal_eval(prompt)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if parsed is not None:
+                return normalize_prompt(parsed, tokenizer, enable_thinking=enable_thinking)
+        if normalize_enable_thinking(enable_thinking) != "auto" and tokenizer is not None and hasattr(tokenizer, "apply_chat_template") and not looks_like_rendered_chat_prompt(prompt):
+            try:
+                return apply_chat_template_with_optional_thinking(tokenizer, [{"role": "user", "content": prompt}], enable_thinking=enable_thinking)
+            except Exception:
+                pass
     if hasattr(prompt, "tolist"):
         try:
-            return normalize_prompt(prompt.tolist(), tokenizer)
+            return normalize_prompt(prompt.tolist(), tokenizer, enable_thinking=enable_thinking)
         except (AttributeError, TypeError, ValueError):
             pass
     if isinstance(prompt, dict):
         if "messages" in prompt:
-            return normalize_prompt(prompt["messages"], tokenizer)
+            return normalize_prompt(prompt["messages"], tokenizer, enable_thinking=enable_thinking)
         for key in ("prompt", "text", "content"):
             if key in prompt:
                 return str(prompt[key])
@@ -73,7 +109,7 @@ def normalize_prompt(prompt: Any, tokenizer=None) -> str:
         if all(isinstance(item, dict) for item in values):
             if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
                 try:
-                    return tokenizer.apply_chat_template(values, tokenize=False, add_generation_prompt=True)
+                    return apply_chat_template_with_optional_thinking(tokenizer, values, enable_thinking=enable_thinking)
                 except Exception:
                     pass
             return "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in values)
@@ -91,8 +127,8 @@ def extract_prompt_value(row, prompt_key: str) -> Any:
     raise KeyError(f"Cannot find prompt column. Requested {prompt_key!r}; available columns: {available}")
 
 
-def extract_prompt(row, prompt_key: str, tokenizer=None) -> str:
-    return normalize_prompt(extract_prompt_value(row, prompt_key), tokenizer)
+def extract_prompt(row, prompt_key: str, tokenizer=None, *, enable_thinking: str = "auto") -> str:
+    return normalize_prompt(extract_prompt_value(row, prompt_key), tokenizer, enable_thinking=enable_thinking)
 
 
 def extract_data_source(row, dataset_path: str | Path | None = None) -> str:

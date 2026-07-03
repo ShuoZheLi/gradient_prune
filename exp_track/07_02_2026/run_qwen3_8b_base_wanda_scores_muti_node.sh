@@ -106,6 +106,7 @@ shuffle="${SHUFFLE:-0}"
 only_correct="${ONLY_CORRECT:-0}"
 trust_remote_code="${TRUST_REMOTE_CODE:-0}"
 overwrite="${OVERWRITE:-0}"
+enable_thinking="${ENABLE_THINKING:-auto}"
 dry_run="${DRY_RUN:-0}"
 
 mkdir -p "$output_dir" "$log_dir"
@@ -169,6 +170,7 @@ score_args=(
   --max-length "$max_length"
   --dtype "$dtype"
   --seed "$seed"
+  --enable-thinking "$enable_thinking"
 )
 [[ -n "$max_samples" ]] && score_args+=(--max-samples "$max_samples")
 [[ "$shuffle" == "1" ]] && score_args+=(--shuffle)
@@ -204,6 +206,7 @@ echo "[wanda] output_dir=$output_dir"
 echo "[wanda] log_dir=$log_dir"
 echo "[wanda] cache_root=$cache_root"
 echo "[wanda] conda_env=$CONDA_ENV"
+echo "[wanda] enable_thinking=$enable_thinking"
 printf '[wanda] command:'
 printf ' %q' torchrun "${torchrun_args[@]}" "${score_args[@]}"
 printf '\n'

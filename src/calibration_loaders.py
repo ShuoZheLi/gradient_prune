@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from data_utils import first_present, load_table
+from task_scoring import normalize_enable_thinking, normalize_prompt
 
 LOGGER = logging.getLogger(__name__)
 IGNORE_INDEX = -100
@@ -69,9 +70,12 @@ def load_calibration_examples(
     text_key: str | None = None,
     prompt_key: str = "prompt",
     response_key: str | None = "response",
+    tokenizer=None,
     shuffle: bool = False,
     seed: int = 42,
+    enable_thinking: str = "auto",
 ) -> list[CalibrationExample]:
+    enable_thinking = normalize_enable_thinking(enable_thinking)
     df = load_table(path)
     if only_correct and "is_correct" in df.columns:
         df = df[df["is_correct"] == True]
@@ -85,12 +89,18 @@ def load_calibration_examples(
             text = str(first_present(row, [text_key or "text", "prompt_generated_trajectory", "text", "content"]))
             examples.append(CalibrationExample(None, None, text))
         else:
-            prompt = str(first_present(row, [prompt_key, "prompt", "query", "question"], ""))
+            prompt_value = first_present(row, [prompt_key, "prompt", "query", "question", "messages"], "")
+            prompt = normalize_prompt(prompt_value, None, enable_thinking=enable_thinking)
+            if enable_thinking != "auto" and tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+                prompt = normalize_prompt(prompt_value, tokenizer, enable_thinking=enable_thinking)
             response = first_present(row, [response_key] if response_key else [], None)
             if response is None:
                 response = first_present(row, ["response", "answer", "solution"], "")
             response = str(response)
-            text = str(first_present(row, ["prompt_generated_trajectory", "trajectory", "text"], prompt + response))
+            if enable_thinking == "auto":
+                text = str(first_present(row, ["prompt_generated_trajectory", "trajectory", "text"], prompt + response))
+            else:
+                text = prompt + response
             examples.append(CalibrationExample(prompt, response, text))
     LOGGER.info("Loaded %d calibration examples from %s", len(examples), path)
     return examples

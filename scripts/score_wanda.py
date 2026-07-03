@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-correct", action="store_true", help="Filter calibration rows where is_correct is true when present.")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing complete output directory.")
+    parser.add_argument("--enable-thinking", choices=("auto", "true", "false"), default="auto", help="Qwen3 chat-template thinking mode for reconstructing prompt/response calibration text.")
     return parser.parse_args()
 
 
@@ -197,6 +198,7 @@ def main() -> int:
         seed=args.seed,
         model_name=args.model,
         shuffle=args.shuffle,
+        enable_thinking=args.enable_thinking,
     )
 
     LOGGER.info("Rank %d/%d finished activation statistics", rank, world_size)
@@ -218,6 +220,7 @@ def main() -> int:
                 "prune_ops": prune_ops,
                 "seed": args.seed,
                 "shuffle": args.shuffle,
+                "enable_thinking": args.enable_thinking,
                 "distributed_world_size": world_size,
             },
         )

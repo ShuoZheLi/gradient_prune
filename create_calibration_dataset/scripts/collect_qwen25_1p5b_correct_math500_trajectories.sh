@@ -38,6 +38,7 @@ enforce_eager="${ENFORCE_EAGER:-1}"
 response_key="${RESPONSE_KEY:-}"
 reward_score_dir="${REWARD_SCORE_DIR:-}"
 trust_remote_code="${TRUST_REMOTE_CODE:-0}"
+enable_thinking="${ENABLE_THINKING:-auto}"
 skip_merge="${SKIP_MERGE:-1}"
 progress_interval="${PROGRESS_INTERVAL:-5}"
 dry_run="${DRY_RUN:-0}"
@@ -47,7 +48,7 @@ mkdir -p "$output_dir" "$shard_dir"
 echo "[collect] model_path=$model_path"
 echo "[collect] dataset_path=$dataset_path"
 echo "[collect] raw_jsonl=$raw_jsonl"
-echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache"
+echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache enable_thinking=$enable_thinking"
 echo "[collect] vllm tensor_parallel_size=$tensor_parallel_size gpu_memory_utilization=$gpu_memory_utilization enforce_eager=$enforce_eager"
 
 run_generation_shard() {
@@ -87,7 +88,8 @@ PYRESOLVE
             --top_k "$top_k" \
             --tensor_parallel_size "$tensor_parallel_size" \
             --gpu_memory_utilization "$gpu_memory_utilization" \
-            --dtype "$dtype"
+            --dtype "$dtype" \
+            --enable-thinking "$enable_thinking"
         if [ "$enforce_eager" = "1" ]; then
             set -- "$@" --enforce_eager
         else
@@ -111,7 +113,8 @@ PYRESOLVE
             --top_p "$top_p" \
             --top_k "$top_k" \
             --dtype "${TRANSFORMERS_DTYPE:-bf16}" \
-            --device cuda:0
+            --device cuda:0 \
+            --enable-thinking "$enable_thinking"
         if [ "$use_cache" = "1" ]; then
             set -- "$@" --use_cache
         fi

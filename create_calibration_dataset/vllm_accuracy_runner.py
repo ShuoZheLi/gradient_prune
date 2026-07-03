@@ -25,6 +25,7 @@ from task_scoring import (
     extract_data_source,
     extract_ground_truth,
     extract_prompt,
+    normalize_enable_thinking,
     score_response as score_task_example_response,
 )
 
@@ -75,7 +76,7 @@ def _load_dataframe(path: str | Path) -> pd.DataFrame:
     return dataset.to_pandas()
 
 
-def load_examples(path: str | Path, tokenizer, *, prompt_key: str, response_key: str | None, start_index: int, max_examples: int, shuffle: bool, seed: int) -> list[ExampleRecord]:
+def load_examples(path: str | Path, tokenizer, *, prompt_key: str, response_key: str | None, start_index: int, max_examples: int, shuffle: bool, seed: int, enable_thinking: str = "auto") -> list[ExampleRecord]:
     dataframe = _load_dataframe(path)
     indices = list(range(len(dataframe)))
     if start_index:
@@ -91,7 +92,7 @@ def load_examples(path: str | Path, tokenizer, *, prompt_key: str, response_key:
         examples.append(
             ExampleRecord(
                 example_id=int(index),
-                prompt_text=extract_prompt(row, prompt_key, tokenizer),
+                prompt_text=extract_prompt(row, prompt_key, tokenizer, enable_thinking=enable_thinking),
                 data_source=data_source,
                 ground_truth=extract_ground_truth(row, response_key),
             )
@@ -127,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--enable-thinking", choices=("auto", "true", "false"), default="auto", help="Qwen3 chat-template thinking mode. auto leaves tokenizer defaults unchanged.")
     eager_group = parser.add_mutually_exclusive_group()
     eager_group.add_argument("--enforce_eager", "--enforce-eager", dest="enforce_eager", action="store_true")
     eager_group.add_argument("--no_enforce_eager", "--no-enforce_eager", "--no-enforce-eager", dest="enforce_eager", action="store_false")
@@ -184,6 +186,7 @@ def configure_cuda_multiprocessing() -> None:
 def main() -> None:
     configure_cuda_multiprocessing()
     args = parse_args()
+    args.enable_thinking = normalize_enable_thinking(args.enable_thinking)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -197,6 +200,7 @@ def main() -> None:
         max_examples=args.max_examples,
         shuffle=args.shuffle,
         seed=args.seed,
+        enable_thinking=args.enable_thinking,
     )
 
     from vllm import LLM
@@ -227,7 +231,7 @@ def main() -> None:
                     for example, response in zip(batch_examples, responses):
                         row = None
                         if response_log_max < 0 or logged_responses < response_log_max:
-                            row = {"example_id": example.example_id, "prompt": example.prompt_text, "response": response}
+                            row = {"example_id": example.example_id, "prompt": example.prompt_text, "response": response, "enable_thinking": args.enable_thinking}
                         if example.ground_truth is None:
                             num_unscored += 1
                             if row is not None:

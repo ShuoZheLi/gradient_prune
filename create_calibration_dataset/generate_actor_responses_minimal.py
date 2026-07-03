@@ -7,9 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from task_scoring import normalize_enable_thinking
 
 try:
     from .model_accuracy_test import evaluate_model_task_accuracy, load_examples, resolve_dtype
@@ -94,11 +101,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--skip_merge", action="store_true")
+    parser.add_argument("--enable-thinking", choices=("auto", "true", "false"), default="auto", help="Qwen3 chat-template thinking mode. auto leaves tokenizer defaults unchanged.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    args.enable_thinking = normalize_enable_thinking(args.enable_thinking)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -126,6 +135,7 @@ def main() -> None:
         max_examples=args.max_examples,
         shuffle=args.shuffle,
         seed=args.seed,
+        enable_thinking=args.enable_thinking,
     )
     metrics = evaluate_model_task_accuracy(
         model,

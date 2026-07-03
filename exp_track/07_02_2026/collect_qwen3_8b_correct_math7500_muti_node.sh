@@ -117,6 +117,7 @@ enforce_eager="${ENFORCE_EAGER:-1}"
 response_key="${RESPONSE_KEY:-}"
 reward_score_dir="${REWARD_SCORE_DIR:-}"
 trust_remote_code="${TRUST_REMOTE_CODE:-0}"
+enable_thinking="${ENABLE_THINKING:-true}"
 skip_merge="${SKIP_MERGE:-1}"
 progress_interval="${PROGRESS_INTERVAL:-5}"
 dry_run="${DRY_RUN:-0}"
@@ -226,6 +227,7 @@ PYRESOLVE
       --tensor_parallel_size "$tensor_parallel_size"
       --gpu_memory_utilization "$gpu_memory_utilization"
       --dtype "$dtype"
+      --enable-thinking "$enable_thinking"
     )
     if [[ "$enforce_eager" == "1" ]]; then
       cmd+=(--enforce_eager)
@@ -252,6 +254,7 @@ PYRESOLVE
       --top_k "$top_k"
       --dtype "${TRANSFORMERS_DTYPE:-bf16}"
       --device cuda:0
+      --enable-thinking "$enable_thinking"
     )
     [[ "$use_cache" == "1" ]] && cmd+=(--use_cache)
     [[ "$trust_remote_code" == "1" ]] && cmd+=(--trust_remote_code)
@@ -343,7 +346,7 @@ echo "[collect] dataset_path=$dataset_path"
 echo "[collect] output_dir=$output_dir"
 echo "[collect] raw_jsonl=$raw_jsonl"
 echo "[collect] cache_root=$cache_root"
-echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache"
+echo "[collect] generation_backend=$generation_backend batch_size=$batch_size generation_max_batch_tokens=$generation_max_batch_tokens use_cache=$use_cache enable_thinking=$enable_thinking"
 echo "[collect] vllm tensor_parallel_size=$tensor_parallel_size gpu_memory_utilization=$gpu_memory_utilization enforce_eager=$enforce_eager"
 
 if [[ ! -d "$repo_root" ]]; then
@@ -385,7 +388,7 @@ for node in "${nodes_array[@]}"; do
       fi
       shard_output="$shard_dir/raw_actor_responses_shard_${shard_index}.jsonl"
       shard_log="$log_dir/shard_${shard_index}_${node}.log"
-      inner_cmd="cd $(printf '%q' "$repo_root") || exit 1; source $(printf '%q' "${VENV}/bin/activate") 2>/dev/null || true; $(declare -f run_generation_shard); python_bin=$(printf '%q' "$python_bin"); model_path=$(printf '%q' "$model_path"); dataset_path=$(printf '%q' "$dataset_path"); shard_dir=$(printf '%q' "$shard_dir"); generation_backend=$(printf '%q' "$generation_backend"); skip_merge=$(printf '%q' "$skip_merge"); seed=$(printf '%q' "$seed"); max_prompt_length=$(printf '%q' "$max_prompt_length"); max_new_tokens=$(printf '%q' "$max_new_tokens"); batch_size=$(printf '%q' "$batch_size"); generation_max_batch_tokens=$(printf '%q' "$generation_max_batch_tokens"); response_log_max=$(printf '%q' "$response_log_max"); temperature=$(printf '%q' "$temperature"); top_p=$(printf '%q' "$top_p"); top_k=$(printf '%q' "$top_k"); tensor_parallel_size=$(printf '%q' "$tensor_parallel_size"); gpu_memory_utilization=$(printf '%q' "$gpu_memory_utilization"); dtype=$(printf '%q' "$dtype"); enforce_eager=$(printf '%q' "$enforce_eager"); use_cache=$(printf '%q' "$use_cache"); trust_remote_code=$(printf '%q' "$trust_remote_code"); response_key=$(printf '%q' "$response_key"); reward_score_dir=$(printf '%q' "$reward_score_dir"); dry_run=$(printf '%q' "$dry_run"); export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") VLLM_NO_USAGE_STATS=1 VLLM_WORKER_MULTIPROC_METHOD=$(printf '%q' "$VLLM_WORKER_MULTIPROC_METHOD") VLLM_USE_V1=$(printf '%q' "$VLLM_USE_V1"); run_generation_shard $(printf '%q' "$shard_index") $(printf '%q' "$shard_start") $(printf '%q' "$shard_count") $(printf '%q' "$gpu_id") $(printf '%q' "$shard_output")"
+      inner_cmd="cd $(printf '%q' "$repo_root") || exit 1; source $(printf '%q' "${VENV}/bin/activate") 2>/dev/null || true; $(declare -f run_generation_shard); python_bin=$(printf '%q' "$python_bin"); model_path=$(printf '%q' "$model_path"); dataset_path=$(printf '%q' "$dataset_path"); shard_dir=$(printf '%q' "$shard_dir"); generation_backend=$(printf '%q' "$generation_backend"); skip_merge=$(printf '%q' "$skip_merge"); seed=$(printf '%q' "$seed"); max_prompt_length=$(printf '%q' "$max_prompt_length"); max_new_tokens=$(printf '%q' "$max_new_tokens"); batch_size=$(printf '%q' "$batch_size"); generation_max_batch_tokens=$(printf '%q' "$generation_max_batch_tokens"); response_log_max=$(printf '%q' "$response_log_max"); temperature=$(printf '%q' "$temperature"); top_p=$(printf '%q' "$top_p"); top_k=$(printf '%q' "$top_k"); tensor_parallel_size=$(printf '%q' "$tensor_parallel_size"); gpu_memory_utilization=$(printf '%q' "$gpu_memory_utilization"); dtype=$(printf '%q' "$dtype"); enforce_eager=$(printf '%q' "$enforce_eager"); use_cache=$(printf '%q' "$use_cache"); trust_remote_code=$(printf '%q' "$trust_remote_code"); enable_thinking=$(printf '%q' "$enable_thinking"); response_key=$(printf '%q' "$response_key"); reward_score_dir=$(printf '%q' "$reward_score_dir"); dry_run=$(printf '%q' "$dry_run"); export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") VLLM_NO_USAGE_STATS=1 VLLM_WORKER_MULTIPROC_METHOD=$(printf '%q' "$VLLM_WORKER_MULTIPROC_METHOD") VLLM_USE_V1=$(printf '%q' "$VLLM_USE_V1"); run_generation_shard $(printf '%q' "$shard_index") $(printf '%q' "$shard_start") $(printf '%q' "$shard_count") $(printf '%q' "$gpu_id") $(printf '%q' "$shard_output")"
       if [[ "$dry_run" == "1" ]]; then
         launch_on_node "$node" "$inner_cmd"
       else

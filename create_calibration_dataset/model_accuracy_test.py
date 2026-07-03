@@ -31,6 +31,7 @@ from task_scoring import (
     is_missing,
     load_reward_module,
     normalize_math_answer,
+    normalize_enable_thinking,
     normalize_prompt,
     reward_module_path,
     scalarize_score,
@@ -144,6 +145,7 @@ def load_examples(
     max_examples: int,
     shuffle: bool,
     seed: int,
+    enable_thinking: str = "auto",
 ) -> list[ExampleRecord]:
     dataframe = _load_dataframe(path)
     indices = list(range(len(dataframe)))
@@ -160,7 +162,7 @@ def load_examples(
         examples.append(
             ExampleRecord(
                 example_id=int(index),
-                prompt_text=normalize_prompt(_extract_prompt_value(row, prompt_key), tokenizer),
+                prompt_text=normalize_prompt(_extract_prompt_value(row, prompt_key), tokenizer, enable_thinking=enable_thinking),
                 data_source=_extract_data_source(row, path),
                 ground_truth=extract_ground_truth(row, response_key=response_key),
             )
@@ -342,6 +344,7 @@ def _score_generated_responses(
     response_log_max: int,
     logged_responses: int,
     reward_score_dir: str | Path | None = None,
+    enable_thinking: str = "auto",
 ) -> tuple[list[float], list[bool], int, int]:
     scores: list[float] = []
     correct: list[bool] = []
@@ -356,7 +359,7 @@ def _score_generated_responses(
             response_log_max < 0 or logged_responses < response_log_max
         )
         if should_log_response:
-            row = {"example_id": example.example_id, "prompt": example.prompt_text, "response": response}
+            row = {"example_id": example.example_id, "prompt": example.prompt_text, "response": response, "enable_thinking": enable_thinking}
         if example.ground_truth is None:
             num_unscored += 1
             if row is not None:
@@ -415,6 +418,7 @@ def evaluate_vllm_task_accuracy(
     *,
     output_path: str | Path | None = None,
     reward_score_dir: str | Path | None = None,
+    enable_thinking: str = "auto",
 ) -> dict[str, Any]:
     if not examples:
         raise ValueError("No examples were loaded. Check dataset path and slicing arguments.")
@@ -462,6 +466,7 @@ def evaluate_vllm_task_accuracy(
                     response_log_max=response_log_max,
                     logged_responses=logged_responses,
                     reward_score_dir=reward_score_dir,
+                    enable_thinking=getattr(args, "enable_thinking", "auto"),
                 )
                 scores.extend(batch_scores)
                 correct.extend(batch_correct)
@@ -526,6 +531,7 @@ def evaluate_model_task_accuracy(
                         response_log_max=response_log_max,
                         logged_responses=logged_responses,
                         reward_score_dir=reward_score_dir,
+                        enable_thinking=getattr(args, "enable_thinking", "auto"),
                     )
                     scores.extend(batch_scores)
                     correct.extend(batch_correct)
@@ -573,6 +579,7 @@ def evaluate_downstream_task_accuracy(
             max_examples=max_examples,
             shuffle=shuffle,
             seed=seed,
+            enable_thinking=enable_thinking,
         )
     eval_config = config or DownstreamEvalConfig(device=str(_model_device(model)))
     backend = getattr(eval_config, "backend", "transformers")
@@ -623,11 +630,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument("--enable-thinking", choices=("auto", "true", "false"), default="auto", help="Qwen3 chat-template thinking mode. auto leaves tokenizer defaults unchanged.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    args.enable_thinking = normalize_enable_thinking(args.enable_thinking)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -654,6 +663,7 @@ def main() -> None:
         max_examples=args.max_examples,
         shuffle=args.shuffle,
         seed=args.seed,
+        enable_thinking=args.enable_thinking,
     )
     metrics = evaluate_model_task_accuracy(
         model,
