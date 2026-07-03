@@ -84,7 +84,7 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 RUN_NAME="${RUN_NAME:-collect_qwen3_8b_math500}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
 
-model_path="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
+model_path="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B-Base}"
 dataset_path="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
 output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen3-8b-instruct_math500_correct}"
 raw_jsonl="${RAW_JSONL:-$output_dir/raw_actor_responses.jsonl}"
