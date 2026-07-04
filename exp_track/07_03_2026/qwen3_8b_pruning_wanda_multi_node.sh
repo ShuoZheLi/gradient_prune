@@ -85,12 +85,19 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # -----------------------------
 RUN_NAME="${RUN_NAME:-qwen3_8b_prune_wanda_math7500}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-${RUN_NAME/_prune_/_}}"
-RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
+RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}_${RUN_TIMESTAMP}}"
 RESULTS_BASE="${RESULTS_BASE:-${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results}}"
 RESULTS_SUBDIR="${RESULTS_SUBDIR:-$EXPERIMENT_NAME}"
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$RESULTS_BASE/$RESULTS_SUBDIR}"
 RESULTS_ROOT="${RUN_OUTPUT_DIR:-$EXPERIMENT_ROOT/runs/${RUN_ID}}"
-SCORE_ROOT="${SCORE_ROOT:-$EXPERIMENT_ROOT/scores}"
+LOAD_SCORES="${LOAD_SCORES:-true}"
+SHARED_SCORE_ROOT="${SHARED_SCORE_ROOT:-$EXPERIMENT_ROOT/scores}"
+if [[ "$LOAD_SCORES" == "true" ]]; then
+  SCORE_ROOT="${SCORE_ROOT:-$SHARED_SCORE_ROOT}"
+else
+  SCORE_ROOT="${SCORE_ROOT:-$RESULTS_ROOT/scores}"
+fi
 LOG_DIR="${LOG_DIR:-$RESULTS_ROOT/logs}"
 DRY_RUN="${DRY_RUN:-0}"
 mkdir -p "$LOG_DIR"
@@ -104,7 +111,7 @@ if [[ "$DRY_RUN" != "1" && ! -d "$MODEL_PATH" ]]; then
   echo "Set MODEL_PATH=/path/to/HF/model visible on all compute nodes." >&2
   exit 2
 fi
-if [[ "$DRY_RUN" != "1" && ! -f "$SCORE_ROOT/metadata.json" ]]; then
+if [[ "$LOAD_SCORES" == "true" && "$DRY_RUN" != "1" && ! -f "$SCORE_ROOT/metadata.json" ]]; then
   echo "Score root does not contain saved scores: $SCORE_ROOT" >&2
   echo "Set SCORE_ROOT=/path/to/saved/scores or set RESULTS_SUBDIR to the experiment directory containing scores/." >&2
   exit 3
@@ -130,7 +137,7 @@ pruning:
   granularity: rowwise
   save_pruned_models: false
   load_masks: false
-  load_scores: true
+  load_scores: __LOAD_SCORES__
   score_root: __SCORE_ROOT__
 
 # methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
@@ -230,7 +237,7 @@ output:
   save_plots: true
 YAML
 
-python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" "$SCORE_ROOT" "$EXPERIMENT_NAME" <<'CONFIG_PATH_PY'
+python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" "$SCORE_ROOT" "$EXPERIMENT_NAME" "$LOAD_SCORES" <<'CONFIG_PATH_PY'
 import sys
 from pathlib import Path
 config_path = Path(sys.argv[1])
@@ -238,11 +245,13 @@ results_root = sys.argv[2]
 model_path = sys.argv[3]
 score_root = sys.argv[4]
 experiment_name = sys.argv[5]
+load_scores = sys.argv[6]
 text = config_path.read_text()
 text = text.replace("__RESULTS_ROOT__", results_root)
 text = text.replace("__MODEL_PATH__", model_path)
 text = text.replace("__SCORE_ROOT__", score_root)
 text = text.replace("__EXPERIMENT_NAME__", experiment_name)
+text = text.replace("__LOAD_SCORES__", load_scores)
 config_path.write_text(text)
 CONFIG_PATH_PY
 
@@ -326,6 +335,8 @@ SHARDED_EVAL="${SHARDED_EVAL:-1}"
 # -----------------------------
 echo "[prune] Job ID: ${SLURM_JOB_ID:-manual}"
 echo "[prune] Run ID: $RUN_ID"
+echo "[prune] Run timestamp: $RUN_TIMESTAMP"
+echo "[prune] load_scores=$LOAD_SCORES"
 echo "[prune] repo_root=$repo_root"
 echo "[prune] nodes=${nodes_array[*]}"
 echo "[prune] num_nodes=$num_nodes nproc_per_node=$nproc_per_node world_size=$world_size"
@@ -336,6 +347,7 @@ echo "[prune] results_subdir=$RESULTS_SUBDIR"
 echo "[prune] experiment_root=$EXPERIMENT_ROOT"
 echo "[prune] results_root=$RESULTS_ROOT"
 echo "[prune] score_root=$SCORE_ROOT"
+echo "[prune] shared_score_root=$SHARED_SCORE_ROOT"
 echo "[prune] model_path=$MODEL_PATH"
 echo "[prune] log_dir=$LOG_DIR"
 echo "[prune] cache_root=$cache_root"
