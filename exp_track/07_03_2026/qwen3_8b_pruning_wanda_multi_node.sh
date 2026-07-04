@@ -136,7 +136,7 @@ calibration:
   only_correct: true
   loss_on: full_trajectory
   max_samples: 500
-  microbatch_size: 62
+  microbatch_size: 32
   fisher_estimator: per_example
   max_length: 18432
 
