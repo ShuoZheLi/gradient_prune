@@ -5,6 +5,7 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -171,7 +172,7 @@ def _evaluate_vllm(*args, **kwargs):
         tokenizer = AutoTokenizer.from_pretrained(str(model_path), use_fast=False, trust_remote_code=bool(trust_remote_code))
     except Exception:
         tokenizer = None
-    examples = _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer, enable_thinking=enable_thinking)
+    examples = _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer, dataset_path=dataset_path, enable_thinking=enable_thinking)
     if not examples:
         return _write_accuracy_outputs([], output_jsonl, metrics_json)
     worker_count = min(max(int(data_parallel_size), 1), len(examples))
@@ -254,8 +255,8 @@ def batch_size_from_kwargs(kwargs: dict) -> int:
     return max(int(kwargs.get("batch_size", 1)), 1)
 
 
-def _dataframe_to_accuracy_examples(df, prompt_key: str, response_key: str | None, tokenizer=None, *, enable_thinking: str = "auto") -> list[dict[str, Any]]:
-    return [task_example_to_dict(example) for example in dataframe_to_task_examples(df, prompt_key, response_key, tokenizer, enable_thinking=enable_thinking)]
+def _dataframe_to_accuracy_examples(df, prompt_key: str, response_key: str | None, tokenizer=None, *, dataset_path: str | Path | None = None, enable_thinking: str = "auto") -> list[dict[str, Any]]:
+    return [task_example_to_dict(example) for example in dataframe_to_task_examples(df, prompt_key, response_key, tokenizer, dataset_path=dataset_path, enable_thinking=enable_thinking)]
 
 
 def _split_round_robin(items: list[dict[str, Any]], num_shards: int) -> list[list[dict[str, Any]]]:
@@ -373,7 +374,8 @@ def _vllm_worker_entrypoint(progress_queue, **kwargs):
         progress_queue.put(("result", rows))
         progress_queue.put(("done", kwargs["worker_id"]))
     except Exception as exc:
-        progress_queue.put(("error", f"worker {kwargs.get('worker_id')} failed: {exc!r}"))
+        details = traceback.format_exc()
+        progress_queue.put(("error", f"worker {kwargs.get('worker_id')} failed: {exc!r}\n{details}"))
 
 
 def _run_vllm_worker(

@@ -85,8 +85,10 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # -----------------------------
 RUN_NAME="${RUN_NAME:-qwen3_8b_prune_wanda_math7500}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
-RESULTS_ROOT="${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results/qwen3_8b_wanda_math7500}"
-LOG_DIR="${LOG_DIR:-$RESULTS_ROOT/logs/${RUN_ID}}"
+RESULTS_BASE="${RESULTS_BASE:-${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results/}}"
+RESULTS_ROOT="${RUN_OUTPUT_DIR:-$RESULTS_BASE/runs/${RUN_ID}}"
+SCORE_ROOT="${SCORE_ROOT:-$RESULTS_BASE/scores}"
+LOG_DIR="${LOG_DIR:-$RESULTS_ROOT/logs}"
 DRY_RUN="${DRY_RUN:-0}"
 mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
@@ -120,8 +122,8 @@ pruning:
   granularity: rowwise
   save_pruned_models: false
   load_masks: false
-  load_scores: false
-  score_root: null
+  load_scores: true
+  score_root: __SCORE_ROOT__
 
 # methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
 methods: [wanda]
@@ -220,15 +222,17 @@ output:
   save_plots: true
 YAML
 
-python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" <<'CONFIG_PATH_PY'
+python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" "$SCORE_ROOT" <<'CONFIG_PATH_PY'
 import sys
 from pathlib import Path
 config_path = Path(sys.argv[1])
 results_root = sys.argv[2]
 model_path = sys.argv[3]
+score_root = sys.argv[4]
 text = config_path.read_text()
 text = text.replace("__RESULTS_ROOT__", results_root)
 text = text.replace("__MODEL_PATH__", model_path)
+text = text.replace("__SCORE_ROOT__", score_root)
 config_path.write_text(text)
 CONFIG_PATH_PY
 
@@ -293,7 +297,9 @@ echo "[prune] repo_root=$repo_root"
 echo "[prune] nodes=${nodes_array[*]}"
 echo "[prune] num_nodes=$num_nodes nproc_per_node=$nproc_per_node world_size=$world_size"
 echo "[prune] master=${master_addr}:${master_port}"
+echo "[prune] results_base=$RESULTS_BASE"
 echo "[prune] results_root=$RESULTS_ROOT"
+echo "[prune] score_root=$SCORE_ROOT"
 echo "[prune] model_path=$MODEL_PATH"
 echo "[prune] log_dir=$LOG_DIR"
 echo "[prune] cache_root=$cache_root"
@@ -320,4 +326,4 @@ fi
 python -m plotting \
   --results_csv "$RESULTS_ROOT/tables/main_results.csv" \
   --output_dir "$RESULTS_ROOT/plots" \
-  --score_dir "$RESULTS_ROOT/scores"
+  --score_dir "$SCORE_ROOT"
