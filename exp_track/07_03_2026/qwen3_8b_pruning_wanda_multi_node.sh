@@ -135,7 +135,7 @@ calibration:
   path: /work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct
   only_correct: true
   loss_on: full_trajectory
-  max_samples: 500
+  max_samples: null
   microbatch_size: 16
   fisher_estimator: per_example
   max_length: 18432
@@ -147,7 +147,7 @@ calibration_ce:
   type: prompt_response
   only_correct: true
   loss_on: response_only
-  max_samples: 500
+  max_samples: null
   batch_size: 64
   data_parallel_size: 1
   tensor_parallel_size: 1
@@ -163,7 +163,7 @@ heldout_ce:
   backend: vllm
   path: /work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct
   loss_on: response_only
-  max_samples: 256
+  max_samples: null
   batch_size: 64
   data_parallel_size: 1
   tensor_parallel_size: 1
@@ -194,7 +194,7 @@ task_accuracy:
   enabled: true
   dataset_path: /work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet
   backend: vllm
-  max_examples: 500
+  max_examples: null
   prompt_key: prompt
   response_key: null
   reward_score_dir: null
