@@ -11,6 +11,7 @@ import math
 import os
 import random
 import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -69,7 +70,10 @@ def _distributed_rank() -> int:
 
 def _cleanup_distributed() -> None:
     if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        try:
+            dist.barrier()
+        except Exception as exc:
+            LOGGER.warning("Distributed barrier failed during cleanup: %s", exc)
         dist.destroy_process_group()
 
 
@@ -78,9 +82,17 @@ def _clear_torchrun_env() -> None:
         os.environ.pop(key, None)
 
 
-def run_experiment(config_path: str | Path):
+def run_experiment(config_path: str | Path, *, condition_shard_id: int | None = None, num_condition_shards: int | None = None, merge_only: bool = False, prep_only: bool = False):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = load_config(config_path)
+    if merge_only:
+        root = Path(config.output.root_dir)
+        results_dir = root / "tables"
+        rows = merge_condition_results(results_dir, config)
+        scores_dir = _resolve_scores_dir(config, root)
+        if config.output.save_plots and rows:
+            make_plots(results_dir / "main_results.csv", root / "plots", scores_dir)
+        return rows
     distributed = _init_distributed_from_torchrun()
     if distributed and torch.cuda.is_available():
         config.model.device = f"cuda:{int(os.environ['LOCAL_RANK'])}"
@@ -91,15 +103,25 @@ def run_experiment(config_path: str | Path):
     stats_dir = root / "stats"
     masks_root = root / "masks"
     scores_dir = _resolve_scores_dir(config, root)
+    methods = list(config.methods)
+    conditions = _enumerate_conditions(config, methods)
+    selected_conditions = _select_condition_shard(conditions, condition_shard_id=condition_shard_id, num_condition_shards=num_condition_shards)
+    sharded_conditions = len(selected_conditions) != len(conditions)
+    shard_id = _optional_int(condition_shard_id, "CONDITION_SHARD_ID")
     if rank == 0:
         results_dir.mkdir(parents=True, exist_ok=True)
         if not config.pruning.load_scores:
             scores_dir.mkdir(parents=True, exist_ok=True)
-        save_config(config, root / "config.yaml")
+        if not sharded_conditions or shard_id in (None, 0):
+            save_config(config, root / "config.yaml")
 
-    model, tokenizer = load_model_and_tokenizer(config.model.model_name_or_path, config.model.dtype, config.model.device, config.model.trust_remote_code)
-    methods = list(config.methods)
     _validate_pruning_source(config, methods)
+    if sharded_conditions:
+        LOGGER.info("Processing condition shard with %d/%d condition(s)", len(selected_conditions), len(conditions))
+    if not selected_conditions:
+        LOGGER.info("No conditions assigned to this shard")
+        return _read_all_result_rows(results_dir, config)
+    model, tokenizer = load_model_and_tokenizer(config.model.model_name_or_path, config.model.dtype, config.model.device, config.model.trust_remote_code)
     need_grad = (not config.pruning.load_masks and not config.pruning.load_scores) and any(method in GRAD_METHODS for method in methods)
     need_act = (not config.pruning.load_masks and not config.pruning.load_scores) and any(method in ACT_METHODS for method in methods)
     gradient_stats = None
@@ -114,75 +136,111 @@ def run_experiment(config_path: str | Path):
     _cleanup_distributed()
     _clear_torchrun_env()
     _save_representative_scores(model, gradient_stats, activation_stats, scores_dir, config)
+    if prep_only:
+        LOGGER.info("Prep-only mode complete")
+        return []
 
-    rows = _read_existing_results(results_dir)
+    rows = _read_all_result_rows(results_dir, config)
     completed_conditions = {_condition_key(row.get("method"), row.get("sparsity"), row.get("lambda_value")) for row in rows}
-    dense_accuracy = next((row.get("task_accuracy") for row in rows if row.get("method") == "dense" and float(row.get("sparsity", 0.0)) == 0.0), None)
-    for method in methods:
-        lambda_values = config.hybrid.lambda_values if method in LAMBDA_METHODS else [None]
-        for lambda_value in lambda_values:
-            for sparsity in config.pruning.sparsities:
-                if method == "dense" and float(sparsity) != 0.0:
-                    continue
-                condition_key = _condition_key(method, sparsity, lambda_value)
-                if condition_key in completed_conditions:
-                    LOGGER.info("Skipping completed method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
-                    continue
-                LOGGER.info("Running method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
-                run_model = model if method == "dense" and float(sparsity) == 0.0 else copy.deepcopy(model)
-                mask_dir = masks_root / f"method={method}" / f"sparsity={sparsity}" / (f"lambda={lambda_value}" if lambda_value is not None else "lambda=none")
-                if config.pruning.load_scores:
-                    if method in SAVED_SCORE_METHODS:
-                        source_scores_dir = _resolve_scores_dir(config, root)
-                        masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity, lambda_value=lambda_value)
-                        LOGGER.info("Built masks from saved scores in %s", source_scores_dir)
-                        if config.output.save_masks:
-                            save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "saved_scores", "score_root": str(source_scores_dir)})
-                    else:
-                        masks = build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
-                elif config.pruning.load_masks:
-                    source_mask_dir = _resolve_mask_dir(config, method, sparsity, lambda_value)
-                    if _mask_dir_exists(source_mask_dir):
-                        masks = load_masks(source_mask_dir)
-                        LOGGER.info("Loaded masks from %s", source_mask_dir)
-                    else:
-                        if method in SAVED_SCORE_METHODS:
-                            source_scores_dir = _resolve_scores_dir(config, root)
-                            masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity, lambda_value=lambda_value)
-                            LOGGER.info("Built masks from saved scores in %s because %s is missing", source_scores_dir, source_mask_dir)
-                            if config.output.save_masks:
-                                save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "saved_scores", "score_root": str(source_scores_dir)})
-                        elif method in WEIGHT_ONLY_METHODS:
-                            masks = build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
-                            LOGGER.info("Built %s masks from model weights because %s is missing", method, source_mask_dir)
-                            if config.output.save_masks:
-                                save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "model_weights"})
-                        else:
-                            raise FileNotFoundError(f"Mask metadata not found and no safe fallback is available for method={method}: {source_mask_dir / 'metadata.json'}")
-                else:
-                    masks = build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
-                apply_masks(run_model, masks, config.pruning.prune_ops)
-                if config.output.save_masks and not config.pruning.load_masks and not config.pruning.load_scores:
-                    save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value})
-                if config.pruning.save_pruned_models and method != "dense":
-                    save_pruned_model(run_model, tokenizer, root / "models" / f"method={method}" / f"sparsity={sparsity}")
-                metrics = _evaluate_all(run_model, tokenizer, config, root, method, sparsity, lambda_value, models_to_offload=[model, run_model])
-                sparsity_metrics = compute_mask_sparsity(masks)
-                if method == "dense" and dense_accuracy is None:
-                    dense_accuracy = metrics.get("task_accuracy")
-                accuracy_drop = None
-                if dense_accuracy is not None and metrics.get("task_accuracy") is not None:
-                    accuracy_drop = dense_accuracy - metrics["task_accuracy"]
-                row = {"model_name": config.model.model_name_or_path, "calibration_type": config.calibration.type, "calibration_path": config.calibration.path, "loss_on": config.calibration.loss_on, "method": method, "sparsity": float(sparsity), "lambda_value": lambda_value, **metrics, "accuracy_drop": accuracy_drop, "generalization_gap": _diff(metrics.get("heldout_ce"), metrics.get("calibration_ce")), **sparsity_metrics, "seed": config.seed, "notes": "microbatch Fisher for gradient methods" if method in GRAD_METHODS else ""}
-                rows.append(row)
-                _write_results(rows, results_dir)
-                if run_model is not model:
-                    del run_model
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-    if config.output.save_plots:
+    if sharded_conditions:
+        completed_conditions &= {_condition_key(method, sparsity, lambda_value) for method, sparsity, lambda_value in selected_conditions}
+    dense_accuracy = _dense_accuracy_from_rows(rows)
+    if dense_accuracy is None and any(condition[0] != "dense" for condition in selected_conditions):
+        LOGGER.warning("Dense task accuracy is not available yet; accuracy_drop will remain null for this shard until results are merged after dense completes")
+    for method, sparsity, lambda_value in selected_conditions:
+        condition_key = _condition_key(method, sparsity, lambda_value)
+        if condition_key in completed_conditions:
+            LOGGER.info("Skipping completed method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
+            existing_row = next((row for row in rows if _condition_key(row.get("method"), row.get("sparsity"), row.get("lambda_value")) == condition_key), None)
+            if existing_row is not None and not _condition_result_path(results_dir, existing_row).is_file():
+                _write_condition_result(existing_row, results_dir)
+            continue
+        row = _run_condition(model, tokenizer, config, root, masks_root, scores_dir, method, sparsity, lambda_value, gradient_stats, activation_stats, dense_accuracy)
+        if method == "dense" and dense_accuracy is None:
+            dense_accuracy = row.get("task_accuracy")
+        _write_condition_result(row, results_dir)
+        if sharded_conditions:
+            rows = _upsert_result_row(rows, row)
+        else:
+            rows = _upsert_result_row(_read_all_result_rows(results_dir, config), row)
+            rows = _finalize_accuracy_drops(rows)
+            _write_results(rows, results_dir)
+        completed_conditions.add(condition_key)
+    if sharded_conditions:
+        rows = _read_all_result_rows(results_dir, config)
+    if config.output.save_plots and not sharded_conditions:
         make_plots(results_dir / "main_results.csv", root / "plots", scores_dir)
     return rows
+
+
+def _run_condition(model, tokenizer, config, root: Path, masks_root: Path, scores_dir: Path, method: str, sparsity, lambda_value, gradient_stats, activation_stats, dense_accuracy):
+    LOGGER.info("Running method=%s sparsity=%s lambda=%s", method, sparsity, lambda_value)
+    run_model = model if method == "dense" and float(sparsity) == 0.0 else copy.deepcopy(model)
+    try:
+        mask_dir = masks_root / f"method={method}" / f"sparsity={sparsity}" / (f"lambda={lambda_value}" if lambda_value is not None else "lambda=none")
+        masks = _build_or_load_condition_masks(run_model, config, root, mask_dir, method, sparsity, lambda_value, gradient_stats, activation_stats)
+        apply_masks(run_model, masks, config.pruning.prune_ops)
+        if config.output.save_masks and not config.pruning.load_masks and not config.pruning.load_scores:
+            save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value})
+        if config.pruning.save_pruned_models and method != "dense":
+            save_pruned_model(run_model, tokenizer, root / "models" / f"method={method}" / f"sparsity={sparsity}")
+        metrics = _evaluate_all(run_model, tokenizer, config, root, method, sparsity, lambda_value, models_to_offload=[model, run_model])
+        sparsity_metrics = compute_mask_sparsity(masks)
+        accuracy_drop = None
+        if dense_accuracy is not None and metrics.get("task_accuracy") is not None:
+            accuracy_drop = dense_accuracy - metrics["task_accuracy"]
+        return {
+            "model_name": config.model.model_name_or_path,
+            "calibration_type": config.calibration.type,
+            "calibration_path": config.calibration.path,
+            "loss_on": config.calibration.loss_on,
+            "method": method,
+            "sparsity": float(sparsity),
+            "lambda_value": lambda_value,
+            **metrics,
+            "accuracy_drop": accuracy_drop,
+            "generalization_gap": _diff(metrics.get("heldout_ce"), metrics.get("calibration_ce")),
+            **sparsity_metrics,
+            "seed": config.seed,
+            "notes": "microbatch Fisher for gradient methods" if method in GRAD_METHODS else "",
+        }
+    finally:
+        if run_model is not model:
+            del run_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
+def _build_or_load_condition_masks(run_model, config, root: Path, mask_dir: Path, method: str, sparsity, lambda_value, gradient_stats, activation_stats):
+    if config.pruning.load_scores:
+        if method in SAVED_SCORE_METHODS:
+            source_scores_dir = _resolve_scores_dir(config, root)
+            masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity, lambda_value=lambda_value)
+            LOGGER.info("Built masks from saved scores in %s", source_scores_dir)
+            if config.output.save_masks:
+                save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "saved_scores", "score_root": str(source_scores_dir)})
+            return masks
+        return build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
+    if config.pruning.load_masks:
+        source_mask_dir = _resolve_mask_dir(config, method, sparsity, lambda_value)
+        if _mask_dir_exists(source_mask_dir):
+            LOGGER.info("Loaded masks from %s", source_mask_dir)
+            return load_masks(source_mask_dir)
+        if method in SAVED_SCORE_METHODS:
+            source_scores_dir = _resolve_scores_dir(config, root)
+            masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity, lambda_value=lambda_value)
+            LOGGER.info("Built masks from saved scores in %s because %s is missing", source_scores_dir, source_mask_dir)
+            if config.output.save_masks:
+                save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "saved_scores", "score_root": str(source_scores_dir)})
+            return masks
+        if method in WEIGHT_ONLY_METHODS:
+            masks = build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
+            LOGGER.info("Built %s masks from model weights because %s is missing", method, source_mask_dir)
+            if config.output.save_masks:
+                save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "model_weights"})
+            return masks
+        raise FileNotFoundError(f"Mask metadata not found and no safe fallback is available for method={method}: {source_mask_dir / 'metadata.json'}")
+    return build_masks_for_model(run_model, method=method, sparsity=float(sparsity), prune_ops=config.pruning.prune_ops, gradient_stats=gradient_stats, activation_stats=activation_stats, lambda_value=lambda_value, granularity=config.pruning.granularity)
 
 
 def _evaluate_all(model, tokenizer, config, root: Path, method: str, sparsity: float, lambda_value, models_to_offload=None):
@@ -395,7 +453,7 @@ def _cleanup_eval_model_checkpoint(eval_model_path: Path | None) -> None:
 
 
 def _can_use_shared_vllm_evaluator(config) -> bool:
-    if not getattr(config.calibration_ce, "shared_vllm", True):
+    if not bool(getattr(config.calibration_ce, "shared_vllm", False)):
         return False
     if not _all_enabled_evals_use_vllm(config):
         return False
@@ -836,26 +894,177 @@ def _read_existing_results(results_dir: Path):
     return rows
 
 
+def _read_all_result_rows(results_dir: Path, config=None) -> list[dict]:
+    condition_rows = _read_condition_results(results_dir)
+    if condition_rows:
+        if config is not None:
+            return _sort_rows_by_conditions(condition_rows, _enumerate_conditions(config, list(config.methods)))
+        return _sort_result_rows(condition_rows)
+    return _read_existing_results(results_dir)
+
+
+def _enumerate_conditions(config, methods: list[str]) -> list[tuple[str, float, float | None]]:
+    conditions = []
+    for method in methods:
+        lambda_values = config.hybrid.lambda_values if method in LAMBDA_METHODS else [None]
+        for lambda_value in lambda_values:
+            for sparsity in config.pruning.sparsities:
+                if method == "dense" and float(sparsity) != 0.0:
+                    continue
+                conditions.append((method, float(sparsity), None if lambda_value is None else float(lambda_value)))
+    return conditions
+
+
+def _select_condition_shard(conditions: list[tuple[str, float, float | None]], *, condition_shard_id: int | None = None, num_condition_shards: int | None = None) -> list[tuple[str, float, float | None]]:
+    shard_id = _optional_int(condition_shard_id, "CONDITION_SHARD_ID")
+    num_shards = _optional_int(num_condition_shards, "CONDITION_NUM_SHARDS")
+    if shard_id is None and num_shards is None:
+        return conditions
+    if shard_id is None or num_shards is None:
+        raise ValueError("Set both condition_shard_id and num_condition_shards, or neither")
+    if num_shards <= 0:
+        raise ValueError(f"num_condition_shards must be positive; got {num_shards}")
+    if shard_id < 0 or shard_id >= num_shards:
+        raise ValueError(f"condition_shard_id must be in [0, {num_shards}); got {shard_id}")
+    return [condition for index, condition in enumerate(conditions) if index % num_shards == shard_id]
+
+
+def _optional_int(value, env_key: str) -> int | None:
+    if value is None:
+        value = os.environ.get(env_key)
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _dense_accuracy_from_rows(rows: list[dict]) -> float | None:
+    for row in rows:
+        if row.get("method") == "dense" and float(row.get("sparsity", 0.0)) == 0.0 and row.get("task_accuracy") is not None:
+            return float(row["task_accuracy"])
+    for row in rows:
+        if float(row.get("sparsity", 0.0)) == 0.0 and row.get("task_accuracy") is not None:
+            return float(row["task_accuracy"])
+    return None
+
+
+def _upsert_result_row(rows: list[dict], row: dict) -> list[dict]:
+    row_key = _condition_key(row.get("method"), row.get("sparsity"), row.get("lambda_value"))
+    filtered = [existing for existing in rows if _condition_key(existing.get("method"), existing.get("sparsity"), existing.get("lambda_value")) != row_key]
+    filtered.append(row)
+    return _sort_result_rows(filtered)
+
+
+def _sort_result_rows(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=lambda row: (str(row.get("method")), float(row.get("sparsity", 0.0)), _lambda_sort_value(row.get("lambda_value"))))
+
+
+def _lambda_sort_value(lambda_value) -> tuple[int, float]:
+    if lambda_value in (None, "", "None"):
+        return (0, 0.0)
+    return (1, float(lambda_value))
+
+
+def _finalize_accuracy_drops(rows: list[dict]) -> list[dict]:
+    dense_accuracy = _dense_accuracy_from_rows(rows)
+    if dense_accuracy is None:
+        return rows
+    for row in rows:
+        if row.get("task_accuracy") is not None:
+            row["accuracy_drop"] = dense_accuracy - float(row["task_accuracy"])
+    return rows
+
+
+def _condition_result_dir(results_dir: Path) -> Path:
+    return results_dir / "conditions"
+
+
+def _condition_result_path(results_dir: Path, row_or_condition) -> Path:
+    if isinstance(row_or_condition, dict):
+        method = row_or_condition.get("method")
+        sparsity = row_or_condition.get("sparsity")
+        lambda_value = row_or_condition.get("lambda_value")
+    else:
+        method, sparsity, lambda_value = row_or_condition
+    lambda_key = "none" if lambda_value in (None, "", "None") else str(float(lambda_value)).replace(".", "p")
+    filename = f"method={method}__sparsity={str(float(sparsity)).replace('.', 'p')}__lambda={lambda_key}.json"
+    return _condition_result_dir(results_dir) / filename
+
+
+def _write_condition_result(row: dict, results_dir: Path) -> None:
+    path = _condition_result_path(results_dir, row)
+    _atomic_write_text(path, json.dumps(row, indent=2, default=str))
+
+
+def merge_condition_results(results_dir: Path, config=None) -> list[dict]:
+    rows = _read_condition_results(results_dir)
+    if config is not None:
+        rows = _sort_rows_by_conditions(rows, _enumerate_conditions(config, list(config.methods)))
+    else:
+        rows = _sort_result_rows(rows)
+    rows = _finalize_accuracy_drops(rows)
+    if rows:
+        _write_results(rows, results_dir)
+    return rows
+
+
+def _read_condition_results(results_dir: Path) -> list[dict]:
+    condition_dir = _condition_result_dir(results_dir)
+    rows = []
+    if not condition_dir.is_dir():
+        return rows
+    for path in sorted(condition_dir.glob("*.json")):
+        try:
+            rows.append(json.loads(path.read_text(encoding="utf-8")))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Could not parse condition result {path}: {exc}") from exc
+    return rows
+
+
+def _sort_rows_by_conditions(rows: list[dict], conditions: list[tuple[str, float, float | None]]) -> list[dict]:
+    order = {_condition_key(method, sparsity, lambda_value): index for index, (method, sparsity, lambda_value) in enumerate(conditions)}
+    return sorted(rows, key=lambda row: order.get(_condition_key(row.get("method"), row.get("sparsity"), row.get("lambda_value")), len(order)))
+
+
 def _condition_key(method, sparsity, lambda_value):
     lambda_key = "none" if lambda_value in (None, "", "None") else str(float(lambda_value))
     return (str(method), str(float(sparsity)), lambda_key)
 
 
 def _write_results(rows, results_dir: Path):
+    results_dir.mkdir(parents=True, exist_ok=True)
     csv_path = results_dir / "main_results.csv"
     json_path = results_dir / "main_results.json"
-    with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=results_dir, delete=False) as handle:
         writer = csv.DictWriter(handle, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    json_path.write_text(json.dumps(rows, indent=2, default=str), encoding="utf-8")
+        temp_csv = Path(handle.name)
+    temp_json = _atomic_write_text(json_path, json.dumps(rows, indent=2, default=str), replace=False)
+    os.replace(temp_csv, csv_path)
+    os.replace(temp_json, json_path)
+
+
+def _atomic_write_text(path: Path, text: str, *, replace: bool = True) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        handle.write(text)
+        handle.write("\n")
+        temp_path = Path(handle.name)
+    if replace:
+        os.replace(temp_path, path)
+        return path
+    return temp_path
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--condition-shard-id", type=int, default=None)
+    parser.add_argument("--num-condition-shards", type=int, default=None)
+    parser.add_argument("--merge-only", action="store_true")
+    parser.add_argument("--prep-only", action="store_true")
     args = parser.parse_args()
-    run_experiment(args.config)
+    run_experiment(args.config, condition_shard_id=args.condition_shard_id, num_condition_shards=args.num_condition_shards, merge_only=args.merge_only, prep_only=args.prep_only)
 
 
 if __name__ == "__main__":

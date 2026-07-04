@@ -297,6 +297,29 @@ runner_args=(
   -m experiment_runner
   --config "$CONFIG_FILE"
 )
+prep_runner_args=(
+  -m experiment_runner
+  --config "$CONFIG_FILE"
+  --prep-only
+)
+sharded_runner_args=(
+  -m experiment_runner
+  --config "$CONFIG_FILE"
+  --condition-shard-id __CONDITION_SHARD_ID__
+  --num-condition-shards __NUM_CONDITION_SHARDS__
+)
+merge_runner_args=(
+  -m experiment_runner
+  --config "$CONFIG_FILE"
+  --merge-only
+)
+
+# This WANDA sweep loads precomputed scores, so there is no distributed
+# calibration work left to do. Use all allocated nodes as independent condition
+# evaluators by default. Set PREP_WITH_TORCHRUN=1 only for configs that need
+# multi-node gradient/activation collection before the sweep.
+PREP_WITH_TORCHRUN="${PREP_WITH_TORCHRUN:-0}"
+SHARDED_EVAL="${SHARDED_EVAL:-1}"
 
 # -----------------------------
 # Debug info
@@ -319,24 +342,34 @@ echo "[prune] cache_root=$cache_root"
 echo "[prune] venv=${VENV:-none}"
 echo "[prune] python=$(command -v python3 || command -v python || true)"
 printf '[prune] command:'
-printf ' %q' torchrun "${torchrun_args[@]}" "${runner_args[@]}"
+printf ' %q' torchrun "${torchrun_args[@]}" "${prep_runner_args[@]}"
 printf '\n'
+echo "[prune] prep_with_torchrun=$PREP_WITH_TORCHRUN sharded_eval=$SHARDED_EVAL"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[prune] dry run complete; no pruning launched."
   exit 0
 fi
 
-# One torchrun launcher per node. torchrun coordinates all ranks through the same rendezvous endpoint.
-if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v srun >/dev/null 2>&1; then
-  srun --nodes="$num_nodes" --ntasks="$num_nodes" --ntasks-per-node=1 \
-    torchrun "${torchrun_args[@]}" "${runner_args[@]}"
-else
-  torchrun --standalone --nnodes=1 --nproc-per-node="$nproc_per_node" "${runner_args[@]}"
+if [[ "$PREP_WITH_TORCHRUN" == "1" ]]; then
+  # One torchrun launcher per node. torchrun coordinates all ranks through the same rendezvous endpoint.
+  if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v srun >/dev/null 2>&1; then
+    srun --nodes="$num_nodes" --ntasks="$num_nodes" --ntasks-per-node=1 \
+      torchrun "${torchrun_args[@]}" "${prep_runner_args[@]}"
+  else
+    torchrun --standalone --nnodes=1 --nproc-per-node="$nproc_per_node" "${prep_runner_args[@]}"
+  fi
 fi
 
-# Plot only once after all ranks complete.
-python -m plotting \
-  --results_csv "$RESULTS_ROOT/tables/main_results.csv" \
-  --output_dir "$RESULTS_ROOT/plots" \
-  --score_dir "$SCORE_ROOT"
+if [[ "$SHARDED_EVAL" == "1" ]]; then
+  if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v srun >/dev/null 2>&1; then
+    srun --nodes="$num_nodes" --ntasks="$num_nodes" --ntasks-per-node=1 \
+      bash -lc 'set -euo pipefail; shard_id=${SLURM_PROCID:?}; args=(); for arg in "$@"; do arg=${arg/__CONDITION_SHARD_ID__/$shard_id}; arg=${arg/__NUM_CONDITION_SHARDS__/'"$num_nodes"'}; args+=("$arg"); done; python "${args[@]}"' \
+      _ "${sharded_runner_args[@]}"
+  else
+    python "${runner_args[@]}"
+  fi
+  python "${merge_runner_args[@]}"
+else
+  python "${runner_args[@]}"
+fi
