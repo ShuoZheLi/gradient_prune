@@ -84,10 +84,13 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # Runtime config
 # -----------------------------
 RUN_NAME="${RUN_NAME:-qwen3_8b_prune_wanda_math7500}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${RUN_NAME/_prune_/_}}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
-RESULTS_BASE="${RESULTS_BASE:-${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results/}}"
-RESULTS_ROOT="${RUN_OUTPUT_DIR:-$RESULTS_BASE/runs/${RUN_ID}}"
-SCORE_ROOT="${SCORE_ROOT:-$RESULTS_BASE/scores}"
+RESULTS_BASE="${RESULTS_BASE:-${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results}}"
+RESULTS_SUBDIR="${RESULTS_SUBDIR:-$EXPERIMENT_NAME}"
+EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$RESULTS_BASE/$RESULTS_SUBDIR}"
+RESULTS_ROOT="${RUN_OUTPUT_DIR:-$EXPERIMENT_ROOT/runs/${RUN_ID}}"
+SCORE_ROOT="${SCORE_ROOT:-$EXPERIMENT_ROOT/scores}"
 LOG_DIR="${LOG_DIR:-$RESULTS_ROOT/logs}"
 DRY_RUN="${DRY_RUN:-0}"
 mkdir -p "$LOG_DIR"
@@ -101,13 +104,18 @@ if [[ "$DRY_RUN" != "1" && ! -d "$MODEL_PATH" ]]; then
   echo "Set MODEL_PATH=/path/to/HF/model visible on all compute nodes." >&2
   exit 2
 fi
+if [[ "$DRY_RUN" != "1" && ! -f "$SCORE_ROOT/metadata.json" ]]; then
+  echo "Score root does not contain saved scores: $SCORE_ROOT" >&2
+  echo "Set SCORE_ROOT=/path/to/saved/scores or set RESULTS_SUBDIR to the experiment directory containing scores/." >&2
+  exit 3
+fi
 
 cat > "$CONFIG_FILE" <<'YAML'
 # ============================================================================
 # Experiment config
 # Edit this YAML block to change the pruning/evaluation settings.
 # ============================================================================
-experiment_name: qwen3_8b_wanda_math7500
+experiment_name: __EXPERIMENT_NAME__
 seed: 42
 
 model:
@@ -222,17 +230,19 @@ output:
   save_plots: true
 YAML
 
-python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" "$SCORE_ROOT" <<'CONFIG_PATH_PY'
+python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" "$SCORE_ROOT" "$EXPERIMENT_NAME" <<'CONFIG_PATH_PY'
 import sys
 from pathlib import Path
 config_path = Path(sys.argv[1])
 results_root = sys.argv[2]
 model_path = sys.argv[3]
 score_root = sys.argv[4]
+experiment_name = sys.argv[5]
 text = config_path.read_text()
 text = text.replace("__RESULTS_ROOT__", results_root)
 text = text.replace("__MODEL_PATH__", model_path)
 text = text.replace("__SCORE_ROOT__", score_root)
+text = text.replace("__EXPERIMENT_NAME__", experiment_name)
 config_path.write_text(text)
 CONFIG_PATH_PY
 
@@ -297,7 +307,10 @@ echo "[prune] repo_root=$repo_root"
 echo "[prune] nodes=${nodes_array[*]}"
 echo "[prune] num_nodes=$num_nodes nproc_per_node=$nproc_per_node world_size=$world_size"
 echo "[prune] master=${master_addr}:${master_port}"
+echo "[prune] experiment_name=$EXPERIMENT_NAME"
 echo "[prune] results_base=$RESULTS_BASE"
+echo "[prune] results_subdir=$RESULTS_SUBDIR"
+echo "[prune] experiment_root=$EXPERIMENT_ROOT"
 echo "[prune] results_root=$RESULTS_ROOT"
 echo "[prune] score_root=$SCORE_ROOT"
 echo "[prune] model_path=$MODEL_PATH"
