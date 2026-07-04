@@ -5,7 +5,7 @@
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=4:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=slurm-%j_qwen3_8b_prune_wanda.out
 #SBATCH --error=slurm-%j_qwen3_8b_prune_wanda.err
 
