@@ -1,20 +1,95 @@
 #!/bin/bash
+#SBATCH --job-name=qwen3_8b_prune_wanda
+#SBATCH --account=ASC24079
+#SBATCH --partition=gh
+#SBATCH --nodes=8
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=72
+#SBATCH --time=4:00:00
+#SBATCH --output=slurm-%j_qwen3_8b_prune_wanda.out
+#SBATCH --error=slurm-%j_qwen3_8b_prune_wanda.err
+
 set -euo pipefail
 
-# Self-contained pruning launcher.
+# Self-contained multi-node pruning launcher.
 # Edit the "Experiment config" block below instead of maintaining a separate YAML file.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-cd "$REPO_ROOT"
-export PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}"
-
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3}
-if [[ -z "${NUM_GPUS:-}" ]]; then
-  IFS=',' read -r -a _VISIBLE_GPUS <<< "$CUDA_VISIBLE_DEVICES"
-  NUM_GPUS=${#_VISIBLE_GPUS[@]}
+# -----------------------------
+# Environment setup
+# -----------------------------
+if command -v module >/dev/null 2>&1; then
+  module reset
+  module load nvidia/25.9
 fi
-export CUDA_VISIBLE_DEVICES
+
+VENV="${VENV:-/work/09576/shuozhe/verl_setup_tacc/.venv}"
+if [[ -d "$VENV" ]]; then
+  # shellcheck disable=SC1091
+  source "${VENV}/bin/activate"
+fi
+
+find_repo_root() {
+  local start_dir="$1"
+  local dir
+  dir="$(CDPATH= cd -- "$start_dir" 2>/dev/null && pwd)" || return 1
+  while [[ "$dir" != "/" ]]; do
+    if [[ -f "$dir/pyproject.toml" && -d "$dir/src" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir="$(dirname -- "$dir")"
+  done
+  return 1
+}
+
+# Slurm may execute a spooled copy under /var/spool. Prefer explicit overrides,
+# then discover the repo by walking up from submit/current/script directories.
+repo_root="${WORK_DIR:-${REPO_ROOT:-}}"
+if [[ -z "$repo_root" ]]; then
+  for candidate in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$(dirname -- "${BASH_SOURCE[0]}")" "/work2/09576/shuozhe/gradient_prune" "/data/shuozhe/gradient_prune"; do
+    [[ -z "$candidate" ]] && continue
+    if repo_root="$(find_repo_root "$candidate")"; then
+      break
+    fi
+  done
+fi
+if [[ -z "$repo_root" || ! -d "$repo_root" ]]; then
+  echo "Could not locate gradient_prune repo. Set WORK_DIR=/path/to/gradient_prune when submitting." >&2
+  exit 1
+fi
+cd "$repo_root"
+export PYTHONPATH="$repo_root/src:${PYTHONPATH:-}"
+
+cache_root="${CACHE_ROOT:-${SCRATCH:-/tmp}/${USER:-shuozhe}/gradient_prune_cache}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${cache_root}/uv}"
+export HF_HOME="${HF_HOME:-${cache_root}/huggingface}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
+export TORCH_HOME="${TORCH_HOME:-${cache_root}/torch}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${cache_root}/triton}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${cache_root}/xdg}"
+export TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${cache_root}/tiktoken}"
+export PYTHONUNBUFFERED=1
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+export NCCL_ASYNC_ERROR_HANDLING="${NCCL_ASYNC_ERROR_HANDLING:-1}"
+export VLLM_NO_USAGE_STATS=1
+export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export VLLM_USE_V1="${VLLM_USE_V1:-1}"
+mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
+  "$TORCH_HOME" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$TIKTOKEN_ENCODINGS_BASE"
+
+# -----------------------------
+# Runtime config
+# -----------------------------
+RUN_NAME="${RUN_NAME:-qwen3_8b_prune_wanda_math7500}"
+RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
+SCRATCH_ROOT="${SCRATCH:-/tmp/${USER:-shuozhe}}"
+RESULTS_ROOT="${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results/qwen3_8b_wanda_math7500}"
+LOG_DIR="${LOG_DIR:-$RESULTS_ROOT/logs/${RUN_ID}}"
+DRY_RUN="${DRY_RUN:-0}"
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 
 CONFIG_FILE="$(mktemp --suffix=.yaml "${TMPDIR:-/tmp}/qwen3_8b_wanda_7500.XXXXXX")"
 cleanup() {
@@ -54,18 +129,18 @@ hybrid:
 
 calibration:
   type: prompt_response
-  path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math7500_correct
+  path: /work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct
   only_correct: true
   loss_on: full_trajectory
   max_samples: 500
-  microbatch_size: 32
+  microbatch_size: 62
   fisher_estimator: per_example
-  max_length: 2048
+  max_length: 18432
 
 calibration_ce:
   enabled: false
   backend: vllm
-  path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
+  path: /work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct
   type: prompt_response
   only_correct: true
   loss_on: response_only
@@ -83,7 +158,7 @@ calibration_ce:
 heldout_ce:
   enabled: false
   backend: vllm
-  path: /data/shuozhe/gradient_prune/saved_calibration_dataset/qwen2.5-1.5b-instruct_math500_correct
+  path: /work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct
   loss_on: response_only
   max_samples: 256
   batch_size: 64
@@ -114,7 +189,7 @@ text_ppl:
 
 task_accuracy:
   enabled: true
-  dataset_path: /data/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet
+  dataset_path: /work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet
   backend: vllm
   max_examples: 500
   prompt_key: prompt
@@ -134,17 +209,103 @@ task_accuracy:
   trust_remote_code: true
 
 output:
-  root_dir: results/qwen3_8b_wanda_math7500
+  root_dir: __RESULTS_ROOT__
   save_stats: true
   save_masks: true
   save_plots: true
 YAML
 
-RESULTS_ROOT="results/qwen3_8b_wanda_math7500"
+python3 - "$CONFIG_FILE" "$RESULTS_ROOT" <<'CONFIG_PATH_PY'
+import sys
+from pathlib import Path
+config_path = Path(sys.argv[1])
+results_root = sys.argv[2]
+config_path.write_text(config_path.read_text().replace("__RESULTS_ROOT__", results_root))
+CONFIG_PATH_PY
 
-torchrun --standalone --nproc_per_node "$NUM_GPUS" -m experiment_runner \
+# -----------------------------
+# Slurm node/device discovery
+# -----------------------------
+if [[ -n "${SLURM_JOB_NODELIST:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+  mapfile -t nodes_array < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+else
+  nodes_array=("$(hostname)")
+fi
+if [[ ${#nodes_array[@]} -lt 1 ]]; then
+  echo "Could not discover any Slurm nodes." >&2
+  exit 1
+fi
+
+num_nodes="${NUM_NODES:-${#nodes_array[@]}}"
+if [[ "$num_nodes" -gt "${#nodes_array[@]}" ]]; then
+  echo "NUM_NODES=$num_nodes exceeds allocated/discovered nodes=${#nodes_array[@]}." >&2
+  exit 2
+fi
+master_addr="${MASTER_ADDR:-${nodes_array[0]}}"
+master_port="${MASTER_PORT:-$((20000 + (${SLURM_JOB_ID:-0} % 40000)))}"
+
+nproc_per_node="${NPROC_PER_NODE:-}"
+if [[ -z "$nproc_per_node" ]]; then
+  if [[ -n "${LOCAL_DEVICES:-${DEVICES:-}}" ]]; then
+    IFS=',' read -r -a local_devices_array <<< "${LOCAL_DEVICES:-${DEVICES:-}}"
+    nproc_per_node="${#local_devices_array[@]}"
+    export CUDA_VISIBLE_DEVICES="${LOCAL_DEVICES:-${DEVICES:-}}"
+  elif [[ -n "${SLURM_GPUS_ON_NODE:-}" && "${SLURM_GPUS_ON_NODE}" =~ ^[0-9]+$ ]]; then
+    nproc_per_node="$SLURM_GPUS_ON_NODE"
+  else
+    nproc_per_node="${NUM_GPUS_PER_NODE:-1}"
+  fi
+fi
+world_size=$((num_nodes * nproc_per_node))
+
+if [[ "$num_nodes" -lt 1 || "$nproc_per_node" -lt 1 ]]; then
+  echo "num_nodes and nproc_per_node must be positive; got num_nodes=$num_nodes nproc_per_node=$nproc_per_node" >&2
+  exit 2
+fi
+
+torchrun_args=(
+  --nnodes "$num_nodes"
+  --nproc-per-node "$nproc_per_node"
+  --rdzv-backend c10d
+  --rdzv-endpoint "${master_addr}:${master_port}"
+  --rdzv-id "prune_wanda_${SLURM_JOB_ID:-manual}"
+)
+runner_args=(
+  -m experiment_runner
   --config "$CONFIG_FILE"
+)
 
+# -----------------------------
+# Debug info
+# -----------------------------
+echo "[prune] Job ID: ${SLURM_JOB_ID:-manual}"
+echo "[prune] Run ID: $RUN_ID"
+echo "[prune] repo_root=$repo_root"
+echo "[prune] nodes=${nodes_array[*]}"
+echo "[prune] num_nodes=$num_nodes nproc_per_node=$nproc_per_node world_size=$world_size"
+echo "[prune] master=${master_addr}:${master_port}"
+echo "[prune] results_root=$RESULTS_ROOT"
+echo "[prune] log_dir=$LOG_DIR"
+echo "[prune] cache_root=$cache_root"
+echo "[prune] conda_env=$CONDA_ENV"
+printf '[prune] command:'
+printf ' %q' torchrun "${torchrun_args[@]}" "${runner_args[@]}"
+printf '\n'
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "[prune] dry run complete; no pruning launched."
+  exit 0
+fi
+
+# One torchrun launcher per node. torchrun coordinates all ranks through the same rendezvous endpoint.
+if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v srun >/dev/null 2>&1; then
+  srun --nodes="$num_nodes" --ntasks="$num_nodes" --ntasks-per-node=1 \
+    torchrun "${torchrun_args[@]}" "${runner_args[@]}"
+else
+  torchrun --standalone --nnodes=1 --nproc-per-node="$nproc_per_node" "${runner_args[@]}"
+fi
+
+# Plot only once after all ranks complete.
 python -m plotting \
   --results_csv "$RESULTS_ROOT/tables/main_results.csv" \
   --output_dir "$RESULTS_ROOT/plots" \
