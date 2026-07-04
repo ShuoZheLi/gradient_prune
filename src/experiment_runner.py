@@ -7,6 +7,7 @@ import csv
 import gc
 import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -28,13 +29,13 @@ from layer_utils import iter_prunable_modules
 from masks import compute_mask_sparsity, make_layerwise_mask, make_rowwise_mask
 from model_utils import load_model_and_tokenizer
 from plotting import make_plots
-from pruning_scores import signed_first_order_score, signed_taylor_score
+from pruning_scores import compute_score
 
 LOGGER = logging.getLogger(__name__)
 RESULT_COLUMNS = ["model_name", "calibration_type", "calibration_path", "loss_on", "method", "sparsity", "lambda_value", "calibration_ce", "heldout_ce", "wikitext_ppl", "task_accuracy", "accuracy_drop", "generalization_gap", "num_pruned_weights", "num_total_prunable_weights", "actual_sparsity", "seed", "notes"]
 GRAD_METHODS = {"gradient_norm", "signed_first_order", "signed_taylor", "hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
 ACT_METHODS = {"wanda", "hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
-SAVED_SCORE_METHODS = {"signed_first_order", "signed_taylor"}
+SAVED_SCORE_METHODS = {"magnitude", "gradient_norm", "signed_first_order", "signed_taylor", "wanda", "hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
 WEIGHT_ONLY_METHODS = {"dense", "magnitude"}
 LAMBDA_METHODS = {"hybrid_wanda_signed_taylor", "wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_add_l1", "wanda_gradnorm_z_fusion"}
 
@@ -112,7 +113,7 @@ def run_experiment(config_path: str | Path):
         return
     _cleanup_distributed()
     _clear_torchrun_env()
-    _save_representative_scores(model, gradient_stats, scores_dir, config.pruning.prune_ops)
+    _save_representative_scores(model, gradient_stats, activation_stats, scores_dir, config)
 
     rows = _read_existing_results(results_dir)
     completed_conditions = {_condition_key(row.get("method"), row.get("sparsity"), row.get("lambda_value")) for row in rows}
@@ -133,7 +134,7 @@ def run_experiment(config_path: str | Path):
                 if config.pruning.load_scores:
                     if method in SAVED_SCORE_METHODS:
                         source_scores_dir = _resolve_scores_dir(config, root)
-                        masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity)
+                        masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity, lambda_value=lambda_value)
                         LOGGER.info("Built masks from saved scores in %s", source_scores_dir)
                         if config.output.save_masks:
                             save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "saved_scores", "score_root": str(source_scores_dir)})
@@ -147,7 +148,7 @@ def run_experiment(config_path: str | Path):
                     else:
                         if method in SAVED_SCORE_METHODS:
                             source_scores_dir = _resolve_scores_dir(config, root)
-                            masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity)
+                            masks = _build_masks_from_saved_scores(run_model, method=method, sparsity=float(sparsity), scores_dir=source_scores_dir, prune_ops=config.pruning.prune_ops, granularity=config.pruning.granularity, lambda_value=lambda_value)
                             LOGGER.info("Built masks from saved scores in %s because %s is missing", source_scores_dir, source_mask_dir)
                             if config.output.save_masks:
                                 save_masks(masks, mask_dir, {"method": method, "sparsity": sparsity, "lambda_value": lambda_value, "source": "saved_scores", "score_root": str(source_scores_dir)})
@@ -264,6 +265,7 @@ def _evaluate_all_shared_vllm(config, root: Path, method: str, sparsity: float, 
                 config.task_accuracy.response_key,
                 config.task_accuracy.max_examples,
                 evaluator.get_tokenizer(),
+                enable_thinking=config.task_accuracy.enable_thinking,
             )
             acc = evaluator.evaluate_accuracy_examples(
                 examples=accuracy_examples,
@@ -277,6 +279,7 @@ def _evaluate_all_shared_vllm(config, root: Path, method: str, sparsity: float, 
                 top_k=config.task_accuracy.top_k,
                 batch_size=config.task_accuracy.batch_size,
                 reward_score_dir=config.task_accuracy.reward_score_dir,
+                scorer_backend=config.task_accuracy.scorer_backend,
                 desc="vLLM accuracy",
             )
             out["task_accuracy"] = acc["accuracy"]
@@ -361,6 +364,8 @@ def _evaluate_all_impl(model, tokenizer, config, root: Path, method: str, sparsi
                 config.task_accuracy.dtype,
                 config.task_accuracy.enforce_eager,
                 config.task_accuracy.trust_remote_code,
+                config.task_accuracy.enable_thinking,
+                config.task_accuracy.scorer_backend,
             )
         out["task_accuracy"] = acc["accuracy"]
     return out
@@ -564,8 +569,8 @@ def _mask_dir_exists(mask_dir: Path) -> bool:
     return (mask_dir / "metadata.json").is_file()
 
 
-def _build_masks_from_saved_scores(model, *, method: str, sparsity: float, scores_dir: Path, prune_ops, granularity: str) -> dict[str, torch.Tensor]:
-    if method not in {"signed_first_order", "signed_taylor"}:
+def _build_masks_from_saved_scores(model, *, method: str, sparsity: float, scores_dir: Path, prune_ops, granularity: str, lambda_value: float | None = None) -> dict[str, torch.Tensor]:
+    if method not in SAVED_SCORE_METHODS:
         raise FileNotFoundError(
             f"Missing saved masks and cannot rebuild method={method!r} from saved scores. "
             "Either generate masks first or set pruning.load_masks: false."
@@ -576,9 +581,11 @@ def _build_masks_from_saved_scores(model, *, method: str, sparsity: float, score
         if not score_path.is_file():
             raise FileNotFoundError(f"Score file not found for {name}: {score_path}")
         score_entry = torch.load(score_path, map_location="cpu")
-        if method not in score_entry:
-            raise KeyError(f"Score file {score_path} does not contain key {method!r}")
-        score = score_entry[method]
+        score_key = next((key for key in _score_lookup_keys(method, lambda_value) if key in score_entry), None)
+        if score_key is None:
+            expected = " or ".join(repr(key) for key in _score_lookup_keys(method, lambda_value))
+            raise KeyError(f"Score file {score_path} does not contain key {expected}")
+        score = score_entry[score_key]
         if tuple(score.shape) != tuple(module.weight.shape):
             raise ValueError(f"Score shape {tuple(score.shape)} for {name} does not match weight shape {tuple(module.weight.shape)}")
         if granularity == "rowwise":
@@ -611,12 +618,196 @@ def _hf_checkpoint_exists(path: Path) -> bool:
     return has_config and has_weights
 
 
-def _save_representative_scores(model, gradient_stats, scores_dir: Path, prune_ops):
-    if not gradient_stats:
+def _save_representative_scores(model, gradient_stats, activation_stats, scores_dir: Path, config):
+    methods = _score_methods_to_save(config.methods)
+    if not methods:
         return
-    for name, module in iter_prunable_modules(model, prune_ops):
-        entry = gradient_stats[name]
-        torch.save({"signed_first_order": signed_first_order_score(module.weight.detach().cpu(), entry["g"]), "signed_taylor": signed_taylor_score(module.weight.detach().cpu(), entry["g"], entry["h"])}, scores_dir / f"{name.replace('.', '__')}.pt")
+    scores_dir.mkdir(parents=True, exist_ok=True)
+    modules = dict(iter_prunable_modules(model, config.pruning.prune_ops))
+    index = {}
+    summaries = {}
+    total_numel_by_method = {method: 0 for method in methods}
+    lambda_values = list(config.hybrid.lambda_values)
+    for name, module in modules.items():
+        weight = module.weight.detach().cpu()
+        grad_entry = gradient_stats.get(name) if gradient_stats else None
+        activation_norm = activation_stats.get(name).cpu() if activation_stats and name in activation_stats else None
+        scores = _compute_saved_scores_for_module(weight, grad_entry, activation_norm, methods, lambda_values)
+        if scores:
+            file_name = f"{name.replace('.', '__')}.pt"
+            torch.save(scores, scores_dir / file_name)
+            index[name] = file_name
+            summaries[name] = {method: _tensor_summary(score) for method, score in scores.items()}
+            for method, score in scores.items():
+                total_numel_by_method[method] = total_numel_by_method.get(method, 0) + score.numel()
+    if index:
+        first_summary = next(iter(summaries.values()))
+        saved_methods = list(first_summary.keys())
+        _write_score_sidecars(scores_dir, config, index, summaries, total_numel_by_method, saved_methods)
+
+
+def _score_methods_to_save(methods) -> list[str]:
+    score_methods = []
+    for method in methods:
+        if method in WEIGHT_ONLY_METHODS | SAVED_SCORE_METHODS and method != "dense":
+            score_methods.append(method)
+        if method == "hybrid_wanda_signed_taylor":
+            for base_method in ("wanda", "signed_taylor"):
+                if base_method not in score_methods:
+                    score_methods.append(base_method)
+        elif method in {"wanda_gradnorm_rank_fusion", "wanda_gradnorm_add_l2", "wanda_gradnorm_z_fusion"}:
+            for base_method in ("wanda", "gradient_norm"):
+                if base_method not in score_methods:
+                    score_methods.append(base_method)
+        elif method == "wanda_gradnorm_add_l1":
+            if "wanda" not in score_methods:
+                score_methods.append("wanda")
+    return score_methods
+
+
+def _compute_saved_scores_for_module(weight: torch.Tensor, grad_entry, activation_norm, methods: list[str], lambda_values: list[float]) -> dict[str, torch.Tensor]:
+    scores = {}
+    for method in methods:
+        if method in LAMBDA_METHODS:
+            for lambda_value in lambda_values:
+                score = _compute_optional_score(method, weight, grad_entry, activation_norm, lambda_value=lambda_value)
+                if score is not None:
+                    scores[_score_key(method, lambda_value)] = score.float()
+        else:
+            score = _compute_optional_score(method, weight, grad_entry, activation_norm, lambda_value=None)
+            if score is not None:
+                scores[method] = score.float()
+    return scores
+
+
+def _compute_optional_score(method: str, weight: torch.Tensor, grad_entry, activation_norm, lambda_value: float | None):
+    try:
+        return compute_score(
+            method,
+            weight,
+            g=grad_entry.get("g") if grad_entry else None,
+            h=grad_entry.get("h") if grad_entry else None,
+            abs_g=grad_entry.get("abs_g") if grad_entry else None,
+            activation_norm=activation_norm,
+            lambda_value=lambda_value,
+        )
+    except ValueError:
+        return None
+
+
+def _score_key(method: str, lambda_value: float | None = None) -> str:
+    if lambda_value is None:
+        return method
+    return f"{method}__lambda={lambda_value}"
+
+
+def _score_lookup_keys(method: str, lambda_value: float | None = None) -> tuple[str, ...]:
+    if lambda_value is None:
+        return (method,)
+    return (_score_key(method, lambda_value), method)
+
+
+def _write_score_sidecars(scores_dir: Path, config, modules: dict[str, str], summaries: dict[str, dict], total_numel_by_method: dict[str, int], saved_methods: list[str]) -> None:
+    run_args = _wanda_run_args(config, scores_dir)
+    with open(scores_dir / "run_args.json", "w", encoding="utf-8") as handle:
+        json.dump(run_args, handle, indent=2, default=str)
+    metadata = {
+        "model_name": config.model.model_name_or_path,
+        "calibration_path": config.calibration.path,
+        "calibration_type": config.calibration.type,
+        "only_correct": config.calibration.only_correct,
+        "max_calibration_samples": config.calibration.max_samples,
+        "microbatch_size": config.calibration.microbatch_size,
+        "max_length": config.calibration.max_length,
+        "dtype": config.model.dtype,
+        "prune_ops": config.pruning.prune_ops,
+        "seed": config.seed,
+        "shuffle": config.calibration.shuffle,
+        "enable_thinking": "auto",
+        "distributed_world_size": int(os.environ.get("WORLD_SIZE", "1")),
+        "definition": "abs(weight) * sqrt(mean over observed calibration tokens of input_activation_j^2)",
+        "modules": modules,
+        "num_modules": len(modules),
+    }
+    if saved_methods == ["wanda"]:
+        metadata.update(
+            {
+                "score_key": "wanda",
+                "summaries": {name: module_summaries["wanda"] for name, module_summaries in summaries.items()},
+                "num_total_scores": int(total_numel_by_method.get("wanda", 0)),
+            }
+        )
+    else:
+        metadata.update(
+            {
+                "score_key": None,
+                "score_keys": saved_methods,
+                "definitions": _score_definitions(saved_methods),
+                "summaries": summaries,
+                "num_total_scores": int(sum(total_numel_by_method.get(method, 0) for method in saved_methods)),
+                "num_total_scores_by_key": {method: int(total_numel_by_method.get(method, 0)) for method in saved_methods},
+            }
+        )
+    with open(scores_dir / "metadata.json", "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, default=str)
+
+
+def _score_definitions(methods: list[str]) -> dict[str, str]:
+    definitions = {
+        "magnitude": "abs(weight)",
+        "gradient_norm": "abs(weight) * sqrt(accumulated squared gradient statistic h)",
+        "gradient_l1": "abs(weight) * accumulated absolute gradient statistic",
+        "signed_first_order": "-gradient * weight",
+        "signed_taylor": "-gradient * weight + 0.5 * hessian_diagonal_estimate * weight^2",
+        "wanda": "abs(weight) * sqrt(mean over observed calibration tokens of input_activation_j^2)",
+        "hybrid_wanda_signed_taylor": "wanda + lambda * signed_taylor",
+        "wanda_gradnorm_rank_fusion": "rowwise_rank(wanda) + lambda * rowwise_rank(gradient_norm)",
+        "wanda_gradnorm_add_l2": "wanda + lambda * gradient_norm",
+        "wanda_gradnorm_add_l1": "wanda + lambda * gradient_l1",
+        "wanda_gradnorm_z_fusion": "rowwise_zscore(wanda) + lambda * rowwise_zscore(gradient_norm)",
+    }
+    return {method: definitions.get(method.split("__lambda=", 1)[0], method) for method in methods}
+
+
+def _wanda_run_args(config, scores_dir: Path) -> dict:
+    return {
+        "model": config.model.model_name_or_path,
+        "calibration": config.calibration.path,
+        "output_dir": str(scores_dir),
+        "calibration_type": config.calibration.type,
+        "max_samples": config.calibration.max_samples,
+        "microbatch_size": config.calibration.microbatch_size,
+        "max_length": config.calibration.max_length,
+        "dtype": config.model.dtype,
+        "device": config.model.device,
+        "prune_ops": config.pruning.prune_ops,
+        "seed": config.seed,
+        "shuffle": config.calibration.shuffle,
+        "only_correct": config.calibration.only_correct,
+        "trust_remote_code": config.model.trust_remote_code,
+        "overwrite": False,
+        "enable_thinking": "auto",
+    }
+
+
+def _tensor_summary(tensor: torch.Tensor) -> dict:
+    finite = torch.isfinite(tensor)
+    summary = {
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "numel": int(tensor.numel()),
+        "finite_numel": int(finite.sum().item()),
+    }
+    if not bool(finite.any()):
+        summary.update({"min": math.nan, "max": math.nan, "mean": math.nan})
+        return summary
+    valid = tensor[finite].float()
+    summary.update({
+        "min": float(valid.min().item()),
+        "max": float(valid.max().item()),
+        "mean": float(valid.mean().item()),
+    })
+    return summary
 
 
 def _diff(a, b):

@@ -132,6 +132,8 @@ class TaskAccuracyConfig:
     dtype: str = "auto"
     enforce_eager: bool = True
     trust_remote_code: bool = False
+    enable_thinking: str = "auto"
+    scorer_backend: str = "verl_math_reward"
 
 
 @dataclass

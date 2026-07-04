@@ -60,7 +60,8 @@ fi
 cd "$repo_root"
 export PYTHONPATH="$repo_root/src:${PYTHONPATH:-}"
 
-cache_root="${CACHE_ROOT:-${SCRATCH:-/tmp}/${USER:-shuozhe}/gradient_prune_cache}"
+SCRATCH_ROOT="${SCRATCH:-/tmp/${USER:-shuozhe}}"
+cache_root="${CACHE_ROOT:-${SCRATCH_ROOT}/gradient_prune_cache}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${cache_root}/uv}"
 export HF_HOME="${HF_HOME:-${cache_root}/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}"
@@ -84,18 +85,13 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # -----------------------------
 RUN_NAME="${RUN_NAME:-qwen3_8b_prune_wanda_math7500}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
-SCRATCH_ROOT="${SCRATCH:-/tmp/${USER:-shuozhe}}"
 RESULTS_ROOT="${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results/qwen3_8b_wanda_math7500}"
 LOG_DIR="${LOG_DIR:-$RESULTS_ROOT/logs/${RUN_ID}}"
 DRY_RUN="${DRY_RUN:-0}"
 mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 
-CONFIG_FILE="$(mktemp --suffix=.yaml "${TMPDIR:-/tmp}/qwen3_8b_wanda_7500.XXXXXX")"
-cleanup() {
-  rm -f "$CONFIG_FILE"
-}
-trap cleanup EXIT
+CONFIG_FILE="${CONFIG_FILE:-$LOG_DIR/config.yaml}"
 
 cat > "$CONFIG_FILE" <<'YAML'
 # ============================================================================
@@ -118,7 +114,7 @@ pruning:
   save_pruned_models: false
   load_masks: false
   load_scores: false
-  score_root: /data/shuozhe/gradient_prune/results/qwen3_8b_wanda_math/scores
+  score_root: null
 
 # methods: [dense, magnitude, wanda, gradient_norm, signed_first_order, signed_taylor, hybrid_wanda_signed_taylor]
 methods: [wanda]
@@ -146,7 +142,7 @@ calibration_ce:
   loss_on: response_only
   max_samples: 500
   batch_size: 64
-  data_parallel_size: 3
+  data_parallel_size: 1
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
@@ -162,7 +158,7 @@ heldout_ce:
   loss_on: response_only
   max_samples: 256
   batch_size: 64
-  data_parallel_size: 3
+  data_parallel_size: 1
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
@@ -179,7 +175,7 @@ text_ppl:
   text_key: text
   max_samples: 256
   batch_size: 64
-  data_parallel_size: 3
+  data_parallel_size: 1
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
@@ -195,23 +191,25 @@ task_accuracy:
   prompt_key: prompt
   response_key: null
   reward_score_dir: null
+  scorer_backend: verl_math_reward
   max_prompt_length: 2048
   max_new_tokens: 16384
   temperature: 0.0
   top_p: 1.0
   top_k: 0
   batch_size: 64
-  data_parallel_size: 3
+  data_parallel_size: 1
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
   dtype: auto
   enforce_eager: true
   trust_remote_code: true
+  enable_thinking: true
 
 output:
   root_dir: __RESULTS_ROOT__
   save_stats: true
-  save_masks: true
+  save_masks: false
   save_plots: true
 YAML
 
@@ -287,7 +285,8 @@ echo "[prune] master=${master_addr}:${master_port}"
 echo "[prune] results_root=$RESULTS_ROOT"
 echo "[prune] log_dir=$LOG_DIR"
 echo "[prune] cache_root=$cache_root"
-echo "[prune] conda_env=$CONDA_ENV"
+echo "[prune] venv=${VENV:-none}"
+echo "[prune] python=$(command -v python3 || command -v python || true)"
 printf '[prune] command:'
 printf ' %q' torchrun "${torchrun_args[@]}" "${runner_args[@]}"
 printf '\n'

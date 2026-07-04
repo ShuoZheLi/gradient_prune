@@ -129,3 +129,21 @@ def test_missing_verl_fails_fast_with_actionable_message(monkeypatch):
 
     with pytest.raises(ImportError, match="Activate the verl environment"):
         compute_score_with_reward_module("math_500", "\\boxed{1}", "1")
+
+
+from evaluate_accuracy import _task_scorer_backend_context
+from task_scoring import scorer_backend
+
+
+def test_task_scorer_backend_context_overrides_and_restores(monkeypatch):
+    monkeypatch.setenv("TASK_SCORER_BACKEND", "legacy_modules")
+    with _task_scorer_backend_context("verl_math_reward"):
+        assert scorer_backend() == "verl_math_reward"
+    assert scorer_backend() == "legacy_modules"
+
+
+def test_task_scorer_backend_context_sets_when_missing(monkeypatch):
+    monkeypatch.delenv("TASK_SCORER_BACKEND", raising=False)
+    with _task_scorer_backend_context("verl_math_reward"):
+        assert scorer_backend() == "verl_math_reward"
+    assert "TASK_SCORER_BACKEND" not in __import__("os").environ

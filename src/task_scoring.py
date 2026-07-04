@@ -176,14 +176,14 @@ def extract_ground_truth(row, response_key: str | None = None) -> Any:
     return None
 
 
-def dataframe_to_task_examples(df, prompt_key: str, response_key: str | None = None, tokenizer=None, dataset_path: str | Path | None = None) -> list[TaskExample]:
+def dataframe_to_task_examples(df, prompt_key: str, response_key: str | None = None, tokenizer=None, dataset_path: str | Path | None = None, enable_thinking: str = "auto") -> list[TaskExample]:
     examples: list[TaskExample] = []
     for idx, (_, row) in enumerate(df.iterrows()):
         example_id = int(row["example_id"] if "example_id" in row and not is_missing(row["example_id"]) else row["id"] if "id" in row and not is_missing(row["id"]) else idx)
         examples.append(
             TaskExample(
                 example_id=example_id,
-                prompt=extract_prompt(row, prompt_key, tokenizer),
+                prompt=extract_prompt(row, prompt_key, tokenizer, enable_thinking=enable_thinking),
                 data_source=extract_data_source(row, dataset_path),
                 ground_truth=extract_ground_truth(row, response_key),
             )

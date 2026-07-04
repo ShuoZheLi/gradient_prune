@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from calibration_loaders import CalibrationExample
-from evaluate_accuracy import _dataframe_to_accuracy_examples, _prepare_vllm_worker_environment, _split_round_robin, _temporary_vllm_worker_parent_environment, _worker_cuda_visible_devices, _write_accuracy_outputs, score_task_response
+from evaluate_accuracy import _dataframe_to_accuracy_examples, _prepare_vllm_worker_environment, _split_round_robin, _task_scorer_backend_context, _temporary_vllm_worker_parent_environment, _worker_cuda_visible_devices, _write_accuracy_outputs, score_task_response
 from evaluate_ce import _ce_metrics, _nll_from_prompt_logprobs, _prepare_vllm_ce_example
 
 
@@ -116,6 +116,7 @@ class SharedVLLMEvaluator:
         top_k: int,
         batch_size: int,
         reward_score_dir: str | Path | None = None,
+        scorer_backend: str | None = None,
         desc: str = "vLLM accuracy",
     ) -> dict[str, float | int]:
         if not examples:
@@ -135,6 +136,7 @@ class SharedVLLMEvaluator:
                     "top_k": top_k,
                     "batch_size": batch_size,
                     "reward_score_dir": reward_score_dir,
+                    "scorer_backend": scorer_backend,
                 }
             )
         rows = []
@@ -195,13 +197,13 @@ class SharedVLLMEvaluator:
                     raise RuntimeError(f"Shared vLLM worker exited unexpectedly with code(s): {failed}")
 
 
-def load_accuracy_examples(dataset_path, prompt_key, response_key, max_examples, tokenizer=None):
+def load_accuracy_examples(dataset_path, prompt_key, response_key, max_examples, tokenizer=None, *, enable_thinking: str = "auto"):
     from data_utils import load_table
 
     df = load_table(dataset_path)
     if max_examples is not None:
         df = df.head(max_examples)
-    return _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer)
+    return _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer, enable_thinking=enable_thinking)
 
 
 def _shared_vllm_worker_entrypoint(request_queue, response_queue, **kwargs):
@@ -273,6 +275,7 @@ def _run_shared_vllm_worker(
                     top_k=request["top_k"],
                     batch_size=request["batch_size"],
                     reward_score_dir=request.get("reward_score_dir"),
+                    scorer_backend=request.get("scorer_backend"),
                     seed=seed,
                     response_queue=response_queue,
                 )
@@ -305,7 +308,7 @@ def _run_loaded_llm_ce_job(*, llm, tokenizer, examples, loss_on, max_length, bat
     return total_nll, total_tokens, total_examples
 
 
-def _run_loaded_llm_accuracy_job(*, llm, examples, max_prompt_length, max_new_tokens, temperature, do_sample=None, top_p=1.0, top_k=0, batch_size=1, reward_score_dir=None, seed=42, response_queue=None):
+def _run_loaded_llm_accuracy_job(*, llm, examples, max_prompt_length, max_new_tokens, temperature, do_sample=None, top_p=1.0, top_k=0, batch_size=1, reward_score_dir=None, scorer_backend=None, seed=42, response_queue=None):
     from vllm import SamplingParams
 
     sampling_temperature = temperature if (bool(temperature and temperature > 0) if do_sample is None else bool(do_sample)) else 0.0
@@ -320,7 +323,8 @@ def _run_loaded_llm_accuracy_job(*, llm, examples, max_prompt_length, max_new_to
         outputs = llm.generate(prompts, sampling, use_tqdm=False)
         for example, output in zip(batch, outputs):
             response = output.outputs[0].text
-            task_score, is_correct = score_task_response(response, example["ground_truth"], example.get("data_source", ""), reward_score_dir)
+            with _task_scorer_backend_context(scorer_backend):
+                task_score, is_correct = score_task_response(response, example["ground_truth"], example.get("data_source", ""), reward_score_dir)
             task_score_value = None if example["ground_truth"] is None else task_score
             rows.append({"example_id": example["example_id"], "prompt": example["prompt"], "response": response, "ground_truth": example["ground_truth"], "data_source": example.get("data_source", ""), "task_score": task_score_value, "is_correct": is_correct})
         response_queue.put(("progress", len(batch)))

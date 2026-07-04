@@ -124,3 +124,24 @@ def test_hf_checkpoint_exists_requires_config_and_weights(tmp_path):
     assert not _hf_checkpoint_exists(model_dir)
     (model_dir / "model.safetensors").write_text("stub")
     assert _hf_checkpoint_exists(model_dir)
+
+
+from evaluate_accuracy import _dataframe_to_accuracy_examples
+
+
+class ThinkingTokenizer:
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, enable_thinking=None):
+        assert tokenize is False
+        assert add_generation_prompt is True
+        return f"thinking={enable_thinking};{messages[0]['content']}"
+
+
+def test_task_accuracy_examples_forward_enable_thinking():
+    examples = _dataframe_to_accuracy_examples(
+        pd.DataFrame([{"prompt": "2+2?", "answer": "4"}]),
+        prompt_key="prompt",
+        response_key=None,
+        tokenizer=ThinkingTokenizer(),
+        enable_thinking="true",
+    )
+    assert examples[0]["prompt"] == "thinking=True;2+2?"

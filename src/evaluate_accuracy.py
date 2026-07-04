@@ -24,8 +24,8 @@ from task_scoring import (
 )
 
 
-def _extract_prompt(row, prompt_key: str, tokenizer=None) -> str:
-    return extract_prompt(row, prompt_key, tokenizer)
+def _extract_prompt(row, prompt_key: str, tokenizer=None, *, enable_thinking: str = "auto") -> str:
+    return extract_prompt(row, prompt_key, tokenizer, enable_thinking=enable_thinking)
 
 
 def _extract_data_source(row) -> str:
@@ -61,6 +61,8 @@ def evaluate_task_accuracy(
     dtype: str = "auto",
     enforce_eager: bool = True,
     trust_remote_code: bool = False,
+    enable_thinking: str = "auto",
+    scorer_backend: str | None = None,
 ) -> dict[str, float | int]:
     if backend == "vllm":
         if not isinstance(model_or_model_path, (str, Path)):
@@ -88,6 +90,8 @@ def evaluate_task_accuracy(
             trust_remote_code,
             reward_score_dir,
             batch_size=batch_size,
+            enable_thinking=enable_thinking,
+            scorer_backend=scorer_backend,
         )
     if backend != "transformers":
         raise ValueError(f"Unsupported backend: {backend}")
@@ -108,7 +112,7 @@ def evaluate_task_accuracy(
     model.eval()
     for start in tqdm(range(0, len(df), batch_size), desc="task accuracy"):
         chunk = df.iloc[start : start + batch_size]
-        prompts = [_extract_prompt(row, prompt_key, tokenizer) for _, row in chunk.iterrows()]
+        prompts = [_extract_prompt(row, prompt_key, tokenizer, enable_thinking=enable_thinking) for _, row in chunk.iterrows()]
         encoded = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=max_prompt_length).to(device)
         should_sample = bool(temperature and temperature > 0) if do_sample is None else bool(do_sample)
         gen_kwargs = {"max_new_tokens": max_new_tokens, "do_sample": should_sample, "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id}
@@ -123,7 +127,8 @@ def evaluate_task_accuracy(
         for offset, ((_, row), prompt, response) in enumerate(zip(chunk.iterrows(), prompts, responses)):
             ground_truth = _extract_ground_truth(row, response_key)
             data_source = _extract_data_source(row)
-            task_score, is_correct = score_task_response(response, ground_truth, data_source, reward_score_dir)
+            with _task_scorer_backend_context(scorer_backend):
+                task_score, is_correct = score_task_response(response, ground_truth, data_source, reward_score_dir)
             task_score_value = None if ground_truth is None else task_score
             rows.append({"example_id": int(first_present(row, ["example_id", "id"], start + offset)), "prompt": prompt, "response": response, "ground_truth": ground_truth, "data_source": data_source, "task_score": task_score_value, "is_correct": is_correct})
     metrics = _write_accuracy_outputs(rows, output_jsonl, metrics_json)
@@ -154,6 +159,8 @@ def _evaluate_vllm(*args, **kwargs):
         trust_remote_code,
         reward_score_dir,
     ) = args
+    enable_thinking = kwargs.get("enable_thinking", "auto")
+    scorer_backend = kwargs.get("scorer_backend")
     df = load_table(dataset_path)
     if max_examples is not None:
         df = df.head(max_examples)
@@ -164,7 +171,7 @@ def _evaluate_vllm(*args, **kwargs):
         tokenizer = AutoTokenizer.from_pretrained(str(model_path), use_fast=False, trust_remote_code=bool(trust_remote_code))
     except Exception:
         tokenizer = None
-    examples = _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer)
+    examples = _dataframe_to_accuracy_examples(df, prompt_key, response_key, tokenizer, enable_thinking=enable_thinking)
     if not examples:
         return _write_accuracy_outputs([], output_jsonl, metrics_json)
     worker_count = min(max(int(data_parallel_size), 1), len(examples))
@@ -203,6 +210,7 @@ def _evaluate_vllm(*args, **kwargs):
                 "enforce_eager": enforce_eager,
                 "trust_remote_code": trust_remote_code,
                 "reward_score_dir": reward_score_dir,
+                "scorer_backend": scorer_backend,
             },
         )
         with _temporary_vllm_worker_parent_environment(gpu_ids):
@@ -246,8 +254,8 @@ def batch_size_from_kwargs(kwargs: dict) -> int:
     return max(int(kwargs.get("batch_size", 1)), 1)
 
 
-def _dataframe_to_accuracy_examples(df, prompt_key: str, response_key: str | None, tokenizer=None) -> list[dict[str, Any]]:
-    return [task_example_to_dict(example) for example in dataframe_to_task_examples(df, prompt_key, response_key, tokenizer)]
+def _dataframe_to_accuracy_examples(df, prompt_key: str, response_key: str | None, tokenizer=None, *, enable_thinking: str = "auto") -> list[dict[str, Any]]:
+    return [task_example_to_dict(example) for example in dataframe_to_task_examples(df, prompt_key, response_key, tokenizer, enable_thinking=enable_thinking)]
 
 
 def _split_round_robin(items: list[dict[str, Any]], num_shards: int) -> list[list[dict[str, Any]]]:
@@ -255,6 +263,22 @@ def _split_round_robin(items: list[dict[str, Any]], num_shards: int) -> list[lis
     for idx, item in enumerate(items):
         shards[idx % num_shards].append(item)
     return shards
+
+
+@contextlib.contextmanager
+def _task_scorer_backend_context(scorer_backend: str | None):
+    if not scorer_backend:
+        yield
+        return
+    old_value = os.environ.get("TASK_SCORER_BACKEND")
+    os.environ["TASK_SCORER_BACKEND"] = str(scorer_backend)
+    try:
+        yield
+    finally:
+        if old_value is None:
+            os.environ.pop("TASK_SCORER_BACKEND", None)
+        else:
+            os.environ["TASK_SCORER_BACKEND"] = old_value
 
 
 def _worker_cuda_visible_devices(worker_id: int) -> str:
@@ -372,6 +396,7 @@ def _run_vllm_worker(
     enforce_eager: bool,
     trust_remote_code: bool,
     reward_score_dir: str | Path | None,
+    scorer_backend: str | None = None,
     progress_queue=None,
 ) -> list[dict[str, Any]]:
     _prepare_vllm_worker_environment(gpu_ids)
@@ -403,7 +428,8 @@ def _run_vllm_worker(
         outputs = llm.generate(prompts, sampling, use_tqdm=False)
         for example, output in zip(batch, outputs):
             response = output.outputs[0].text
-            task_score, is_correct = score_task_response(response, example["ground_truth"], example.get("data_source", ""), reward_score_dir)
+            with _task_scorer_backend_context(scorer_backend):
+                task_score, is_correct = score_task_response(response, example["ground_truth"], example.get("data_source", ""), reward_score_dir)
             task_score_value = None if example["ground_truth"] is None else task_score
             rows.append({"example_id": example["example_id"], "prompt": example["prompt"], "response": response, "ground_truth": example["ground_truth"], "data_source": example.get("data_source", ""), "task_score": task_score_value, "is_correct": is_correct})
         if progress_queue is not None:
