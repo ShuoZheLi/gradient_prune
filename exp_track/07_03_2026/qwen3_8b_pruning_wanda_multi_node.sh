@@ -93,6 +93,13 @@ exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 
 CONFIG_FILE="${CONFIG_FILE:-$LOG_DIR/config.yaml}"
 
+MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
+if [[ "$DRY_RUN" != "1" && ! -d "$MODEL_PATH" ]]; then
+  echo "Model path does not exist on this node: $MODEL_PATH" >&2
+  echo "Set MODEL_PATH=/path/to/HF/model visible on all compute nodes." >&2
+  exit 2
+fi
+
 cat > "$CONFIG_FILE" <<'YAML'
 # ============================================================================
 # Experiment config
@@ -102,7 +109,7 @@ experiment_name: qwen3_8b_wanda_math7500
 seed: 42
 
 model:
-  model_name_or_path: /data/shuozhe/saved_model/Qwen3.1-8B-Instruct
+  model_name_or_path: __MODEL_PATH__
   dtype: bf16
   device: cuda:0
   trust_remote_code: true
@@ -213,12 +220,16 @@ output:
   save_plots: true
 YAML
 
-python3 - "$CONFIG_FILE" "$RESULTS_ROOT" <<'CONFIG_PATH_PY'
+python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" <<'CONFIG_PATH_PY'
 import sys
 from pathlib import Path
 config_path = Path(sys.argv[1])
 results_root = sys.argv[2]
-config_path.write_text(config_path.read_text().replace("__RESULTS_ROOT__", results_root))
+model_path = sys.argv[3]
+text = config_path.read_text()
+text = text.replace("__RESULTS_ROOT__", results_root)
+text = text.replace("__MODEL_PATH__", model_path)
+config_path.write_text(text)
 CONFIG_PATH_PY
 
 # -----------------------------
@@ -283,6 +294,7 @@ echo "[prune] nodes=${nodes_array[*]}"
 echo "[prune] num_nodes=$num_nodes nproc_per_node=$nproc_per_node world_size=$world_size"
 echo "[prune] master=${master_addr}:${master_port}"
 echo "[prune] results_root=$RESULTS_ROOT"
+echo "[prune] model_path=$MODEL_PATH"
 echo "[prune] log_dir=$LOG_DIR"
 echo "[prune] cache_root=$cache_root"
 echo "[prune] venv=${VENV:-none}"
