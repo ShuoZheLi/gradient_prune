@@ -23,6 +23,7 @@ from model_accuracy_test import load_examples  # noqa: E402
 from task_scoring import extract_math_answer, normalize_enable_thinking, scalarize_score, score_task_response  # noqa: E402
 
 from response_analysis.io_utils import write_jsonl
+from response_analysis.pruning import apply_score_pruning
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--model_id", default=None)
     parser.add_argument("--pruning_sparsity", type=float, default=0.0)
+    parser.add_argument("--prune_score_dir", default=None, help="Directory containing saved per-module score .pt files plus metadata.json.")
+    parser.add_argument("--prune_score_key", default=None, help="Score key inside each .pt file; inferred from metadata for WANDA score dirs.")
+    parser.add_argument("--prune_granularity", choices=["rowwise", "layerwise"], default="rowwise")
+    parser.add_argument("--prune_ops", default=None, nargs="*", help="Optional prunable op suffixes, e.g. q_proj k_proj v_proj o_proj gate_proj up_proj down_proj.")
+    parser.add_argument("--prune_lambda", type=float, default=None)
     parser.add_argument("--dataset_path", required=True)
     parser.add_argument("--output", default="outputs/generations.jsonl")
     parser.add_argument("--prompt_key", default="prompt")
@@ -115,6 +121,15 @@ def main() -> None:
         trust_remote_code=args.trust_remote_code,
         device_map=None,
     ).to(args.device)
+    pruning_info = apply_score_pruning(
+        model,
+        score_dir=args.prune_score_dir,
+        sparsity=args.pruning_sparsity,
+        score_key=args.prune_score_key,
+        prune_ops=args.prune_ops,
+        granularity=args.prune_granularity,
+        lambda_value=args.prune_lambda,
+    )
     model.eval()
 
     records: list[dict[str, Any]] = []
@@ -126,6 +141,9 @@ def main() -> None:
         "max_prompt_length": args.max_prompt_length,
         "k": args.k,
         "enable_thinking": args.enable_thinking,
+        "prune_score_dir": args.prune_score_dir,
+        "prune_score_key": pruning_info.get("score_key"),
+        "prune_granularity": args.prune_granularity,
     }
 
     for prompt_index, example in enumerate(tqdm(examples, desc="generating")):
@@ -151,6 +169,7 @@ def main() -> None:
                     "model_id": model_id,
                     "model_path": args.model_path,
                     "pruning_sparsity": args.pruning_sparsity,
+                    "pruning_info": pruning_info,
                     "prompt_id": example.example_id,
                     "prompt_index": prompt_index,
                     "sample_id": sample_id,

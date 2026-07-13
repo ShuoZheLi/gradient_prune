@@ -28,6 +28,14 @@ def test_identical_responses_zero_answer_and_strategy_entropy():
     assert strategy_metrics["effective_num_strategies"] == 1.0
 
 
+def test_empty_strategy_subset_has_zero_effective_count():
+    metrics = strategy_diversity([0, 1], [False, False])
+    assert metrics["num_strategy_clusters_correct"] == 0.0
+    assert metrics["strategy_entropy_correct"] == 0.0
+    assert metrics["effective_num_strategies_correct"] == 0.0
+    assert metrics["num_strategy_clusters_incorrect"] == 2.0
+
+
 def test_response_order_permutation_preserves_diversity_metrics():
     responses = ["solve by algebra", "solve by enumeration", "solve by algebra"]
     answers = ["1", "2", "1"]

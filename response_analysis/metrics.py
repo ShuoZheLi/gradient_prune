@@ -147,7 +147,7 @@ def answer_diversity(answers: Sequence[str | None], correctness: Sequence[bool |
         "answer_entropy_valid": valid_entropy,
         "answer_entropy": all_entropy,
         "num_unique_answers": float(len(set(valid_answers))),
-        "effective_num_answers": effective_count(all_entropy),
+        "effective_num_answers": effective_count(all_entropy) if answers else 0.0,
         "valid_parse_rate": (len(valid_answers) / len(answers)) if answers else 0.0,
         "accuracy": accuracy,
         "pass_at_k": pass_at_k,
@@ -156,11 +156,11 @@ def answer_diversity(answers: Sequence[str | None], correctness: Sequence[bool |
 
 def strategy_diversity(cluster_ids: Sequence[Any], correctness: Sequence[bool | int | float | None] | None = None) -> dict[str, float]:
     def stats(items: Sequence[Any], suffix: str) -> dict[str, float]:
-        entropy = categorical_entropy(list(items), ignore_none=True)
         valid_items = [item for item in items if item is not None]
+        entropy = categorical_entropy(valid_items, ignore_none=False)
         return {
             f"strategy_entropy{suffix}": entropy,
-            f"effective_num_strategies{suffix}": effective_count(entropy),
+            f"effective_num_strategies{suffix}": effective_count(entropy) if valid_items else 0.0,
             f"num_strategy_clusters{suffix}": float(len(set(valid_items))),
         }
 

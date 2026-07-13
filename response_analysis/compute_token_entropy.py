@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from response_analysis.io_utils import read_jsonl
 from response_analysis.metrics import selected_logprobs_from_logits, token_entropy_from_logits, top1_stats_from_logits
+from response_analysis.pruning import apply_score_pruning
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,6 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="outputs/token_metrics.parquet")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--model_id", default=None)
+    parser.add_argument("--pruning_sparsity", type=float, default=0.0)
+    parser.add_argument("--prune_score_dir", default=None, help="Directory containing saved per-module score .pt files plus metadata.json.")
+    parser.add_argument("--prune_score_key", default=None, help="Score key inside each .pt file; inferred from metadata for WANDA score dirs.")
+    parser.add_argument("--prune_granularity", choices=["rowwise", "layerwise"], default="rowwise")
+    parser.add_argument("--prune_ops", default=None, nargs="*")
+    parser.add_argument("--prune_lambda", type=float, default=None)
     parser.add_argument("--mode", choices=["on_policy", "fixed_prefix"], default="on_policy")
     parser.add_argument("--prefix_bank", default=None, help="JSONL from build_fixed_prefix_bank.py for fixed-prefix mode.")
     parser.add_argument("--max_prefix_records", type=int, default=-1)
@@ -85,7 +92,10 @@ def token_metrics_for_sequence(model, tokenizer, record: dict[str, Any], args: a
         "sample_id": record.get("sample_id", record.get("prefix_id")),
         "decoding_seed": record.get("decoding_seed"),
         "decoding_config": json.dumps(record.get("decoding_config", {}), sort_keys=True),
-        "pruning_sparsity": record.get("pruning_sparsity"),
+        "pruning_sparsity": args.pruning_sparsity if args.prune_score_dir else record.get("pruning_sparsity"),
+        "prune_score_dir": args.prune_score_dir,
+        "prune_score_key": getattr(args, "_pruning_info", {}).get("score_key"),
+        "prune_granularity": args.prune_granularity,
         "correctness": record.get("correctness"),
         "response_length": length,
         "token_entropy_mean": float(entropy.mean().item()) if length else 0.0,
@@ -110,6 +120,15 @@ def main() -> None:
         trust_remote_code=args.trust_remote_code,
         device_map=None,
     ).to(args.device)
+    args._pruning_info = apply_score_pruning(
+        model,
+        score_dir=args.prune_score_dir,
+        sparsity=args.pruning_sparsity,
+        score_key=args.prune_score_key,
+        prune_ops=args.prune_ops,
+        granularity=args.prune_granularity,
+        lambda_value=args.prune_lambda,
+    )
     model.eval()
 
     rows = []

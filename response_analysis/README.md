@@ -43,6 +43,31 @@ python -m response_analysis.compute_surface_diversity \
   --output outputs/response_metrics.parquet
 ```
 
+## Pruning from saved score files
+
+Both generation and entropy CLIs can load score directories produced by the WANDA pruning jobs, for example a directory containing `metadata.json` and files named like `model__layers__0__self_attn__q_proj.pt`. Pass `--prune_score_dir` and `--pruning_sparsity`; the score key is inferred from metadata when possible, typically `wanda`.
+
+```bash
+python -m response_analysis.generate_responses \
+  --model_path /data/shuozhe/saved_model/Qwen3-8B \
+  --model_id qwen3_8b_wanda_s0.5 \
+  --dataset_path /data/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet \
+  --output outputs/qwen3_8b_wanda_s0.5/generations.jsonl \
+  --k 16 --temperature 1.0 --top_p 1.0 --enable_thinking true \
+  --prune_score_dir /scratch/09576/shuozhe/gradient_prune/results/qwen3_8b_wanda_math7500/scores \
+  --pruning_sparsity 0.5 --prune_granularity rowwise
+
+python -m response_analysis.compute_token_entropy \
+  --model_path /data/shuozhe/saved_model/Qwen3-8B \
+  --model_id qwen3_8b_wanda_s0.5 \
+  --input outputs/qwen3_8b_wanda_s0.5/generations.jsonl \
+  --output outputs/qwen3_8b_wanda_s0.5/token_metrics.parquet \
+  --prune_score_dir /scratch/09576/shuozhe/gradient_prune/results/qwen3_8b_wanda_math7500/scores \
+  --pruning_sparsity 0.5 --prune_granularity rowwise
+```
+
+The mask rule matches the repository pruning code: lower scores are pruned, with `rowwise` pruning `floor(input_dim * sparsity)` weights per output row and `layerwise` pruning the lowest-scoring weights within each module. The model is pruned in memory after loading; training code is not touched.
+
 ## Semantic strategy judge
 
 The judge uses an OpenAI-compatible Chat Completions endpoint only as a semantic evaluator. Keep the evaluator configurable:

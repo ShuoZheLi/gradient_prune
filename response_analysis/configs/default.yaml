@@ -20,6 +20,13 @@ generation:
   seed: 42
   enable_thinking: "true"
   use_cache: false
+pruning:
+  score_dir: null
+  score_key: null  # inferred as "wanda" from WANDA metadata when null
+  sparsity: 0.0
+  granularity: rowwise
+  prune_ops: null
+  lambda_value: null
 entropy:
   fixed_prefix_source: dataset_reference
   dtype: auto
