@@ -5,7 +5,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=4:00:00
+#SBATCH --time=6:00:00
 #SBATCH --output=slurm-%j_qwen3_8b_resp_analysis_sparsity_0d3.out
 #SBATCH --error=slurm-%j_qwen3_8b_resp_analysis_sparsity_0d3.err
 
@@ -135,6 +135,14 @@ DTYPE="${DTYPE:-bf16}"
 DEVICE="${DEVICE:-cuda:0}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 USE_CACHE="${USE_CACHE:-0}"
+LOCAL_DEVICES="${LOCAL_DEVICES:-0}"
+GENERATION_BACKEND="${GENERATION_BACKEND:-vllm}"
+VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
+VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-0}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-}"
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-}"
+DELETE_VLLM_PRUNED_MODEL="${DELETE_VLLM_PRUNED_MODEL:-1}"
 
 PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-}"
 PRUNE_GRANULARITY="${PRUNE_GRANULARITY:-rowwise}"
@@ -232,6 +240,14 @@ MAX_NEW_TOKENS=$MAX_NEW_TOKENS
 ENABLE_THINKING=$ENABLE_THINKING
 DTYPE=$DTYPE
 DEVICE=$DEVICE
+LOCAL_DEVICES=$LOCAL_DEVICES
+GENERATION_BACKEND=$GENERATION_BACKEND
+VLLM_TENSOR_PARALLEL_SIZE=$VLLM_TENSOR_PARALLEL_SIZE
+VLLM_GPU_MEMORY_UTILIZATION=$VLLM_GPU_MEMORY_UTILIZATION
+VLLM_ENFORCE_EAGER=$VLLM_ENFORCE_EAGER
+VLLM_MAX_NUM_SEQS=$VLLM_MAX_NUM_SEQS
+VLLM_MAX_MODEL_LEN=$VLLM_MAX_MODEL_LEN
+DELETE_VLLM_PRUNED_MODEL=$DELETE_VLLM_PRUNED_MODEL
 PRUNING_SPARSITY=$PRUNING_SPARSITY
 PRUNE_SCORE_KEY=$PRUNE_SCORE_KEY
 PRUNE_GRANULARITY=$PRUNE_GRANULARITY
@@ -261,7 +277,13 @@ common_generation_args=(
   --device "$DEVICE"
   --dtype "$DTYPE"
   --enable_thinking "$ENABLE_THINKING"
+  --generation_backend "$GENERATION_BACKEND"
+  --vllm_tensor_parallel_size "$VLLM_TENSOR_PARALLEL_SIZE"
+  --vllm_gpu_memory_utilization "$VLLM_GPU_MEMORY_UTILIZATION"
 )
+if [[ "$VLLM_ENFORCE_EAGER" == "1" ]]; then common_generation_args+=(--vllm_enforce_eager); fi
+if [[ -n "$VLLM_MAX_NUM_SEQS" ]]; then common_generation_args+=(--vllm_max_num_seqs "$VLLM_MAX_NUM_SEQS"); fi
+if [[ -n "$VLLM_MAX_MODEL_LEN" ]]; then common_generation_args+=(--vllm_max_model_len "$VLLM_MAX_MODEL_LEN"); fi
 if [[ -n "$RESPONSE_KEY" ]]; then common_generation_args+=(--response_key "$RESPONSE_KEY"); fi
 if [[ "$TRUST_REMOTE_CODE" == "1" ]]; then common_generation_args+=(--trust_remote_code); fi
 if [[ "$USE_CACHE" == "1" ]]; then common_generation_args+=(--use_cache); fi
@@ -335,7 +357,7 @@ run_generation_shards() {
     local shard_log="$LOG_DIR/shards/${model_id}_shard_${shard_index}_${node}.log"
 
     local cmd
-    cmd="cd $(printf '%q' "$repo_root") && export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") TASK_SCORER_BACKEND=$(printf '%q' "$TASK_SCORER_BACKEND") CUDA_VISIBLE_DEVICES=0; $(printf '%q' "$python_bin") -m response_analysis.generate_responses"
+    cmd="cd $(printf '%q' "$repo_root") && export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") TASK_SCORER_BACKEND=$(printf '%q' "$TASK_SCORER_BACKEND") CUDA_VISIBLE_DEVICES=$(printf '%q' "$LOCAL_DEVICES"); $(printf '%q' "$python_bin") -m response_analysis.generate_responses"
     for arg in "${base_args[@]}"; do cmd+=" $(printf '%q' "$arg")"; done
     cmd+=" --start_index $(printf '%q' "$shard_start") --max_examples $(printf '%q' "$shard_count") --output $(printf '%q' "$shard_output")"
     launch_on_node "$node" "$cmd" >"$shard_log" 2>&1 &
@@ -413,7 +435,7 @@ run_entropy_shards() {
     local shard_output="$shard_dir/token_metrics_shard_${shard_index}.parquet"
     local shard_log="$LOG_DIR/shards/${model_id}_${mode}_entropy_shard_${shard_index}_${node}.log"
     local cmd
-    cmd="cd $(printf '%q' "$repo_root") && export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") CUDA_VISIBLE_DEVICES=0; $(printf '%q' "$python_bin") -m response_analysis.compute_token_entropy"
+    cmd="cd $(printf '%q' "$repo_root") && export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") CUDA_VISIBLE_DEVICES=$(printf '%q' "$LOCAL_DEVICES"); $(printf '%q' "$python_bin") -m response_analysis.compute_token_entropy"
     for arg in "${base_args[@]}"; do cmd+=" $(printf '%q' "$arg")"; done
     if [[ "$mode" == "fixed_prefix" ]]; then
       cmd+=" --mode fixed_prefix --prefix_bank $(printf '%q' "$shard_input") --output $(printf '%q' "$shard_output")"
@@ -464,6 +486,7 @@ run_model_pipeline() {
   local model_entropy_args=("${common_entropy_args[@]}" --model_id "$model_id")
   if [[ "$is_pruned" == "1" ]]; then
     model_generation_args+=("${prune_args[@]}")
+    if [[ "$GENERATION_BACKEND" == "vllm" ]]; then model_generation_args+=(--vllm_pruned_model_dir "$output_dir/vllm_pruned_model"); fi
     model_entropy_args+=("${prune_args[@]}")
   else
     model_generation_args+=(--pruning_sparsity 0.0)
@@ -479,6 +502,11 @@ run_model_pipeline() {
       if [[ -n "$DEBUG_SUBSET" ]]; then serial_generation_args+=(--debug_subset "$DEBUG_SUBSET"); fi
       "$python_bin" -m response_analysis.generate_responses "${serial_generation_args[@]}"
     fi
+  fi
+
+  if [[ "$is_pruned" == "1" && "$GENERATION_BACKEND" == "vllm" && "$DELETE_VLLM_PRUNED_MODEL" == "1" && "$RUN_GENERATION" == "1" ]]; then
+    echo "[$(date)] Deleting temporary pruned vLLM checkpoint for $model_id"
+    rm -rf "$output_dir/vllm_pruned_model" "$output_dir/vllm_pruned_model.lock"
   fi
 
   if [[ "$RUN_ON_POLICY_ENTROPY" == "1" ]]; then

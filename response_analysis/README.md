@@ -14,6 +14,7 @@ source /data/shuozhe/miniconda3/etc/profile.d/conda.sh && conda activate verl
 export PYTHONPATH=/data/shuozhe/gradient_prune:$PYTHONPATH
 
 python -m response_analysis.generate_responses \
+  --generation_backend vllm \
   --model_path /data/shuozhe/saved_model/Qwen3-0.6B \
   --model_id qwen3_0_6b \
   --dataset_path /data/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet \
@@ -47,8 +48,11 @@ python -m response_analysis.compute_surface_diversity \
 
 Both generation and entropy CLIs can load score directories produced by the WANDA pruning jobs, for example a directory containing `metadata.json` and files named like `model__layers__0__self_attn__q_proj.pt`. Pass `--prune_score_dir` and `--pruning_sparsity`; the score key is inferred from metadata when possible, typically `wanda`.
 
+`generate_responses.py` defaults to `--generation_backend vllm` for speed. Dense models are loaded directly by vLLM. Score-pruned models are first pruned in PyTorch, saved once as a temporary HuggingFace checkpoint under `--vllm_pruned_model_dir` or next to the output JSONL, and then loaded by vLLM. Use `--generation_backend transformers` only for debugging or environments without vLLM.
+
 ```bash
 python -m response_analysis.generate_responses \
+  --generation_backend vllm \
   --model_path /data/shuozhe/saved_model/Qwen3-8B \
   --model_id qwen3_8b_wanda_s0.5 \
   --dataset_path /data/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet \

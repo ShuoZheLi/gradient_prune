@@ -11,6 +11,7 @@ dataset:
   max_examples: 500
   debug_subset: null
 generation:
+  backend: vllm
   k: 16
   temperature: 1.0
   top_p: 1.0
@@ -20,6 +21,9 @@ generation:
   seed: 42
   enable_thinking: "true"
   use_cache: false
+  vllm_tensor_parallel_size: 1
+  vllm_gpu_memory_utilization: 0.9
+  vllm_enforce_eager: false
 pruning:
   score_dir: null
   score_key: null  # inferred as "wanda" from WANDA metadata when null

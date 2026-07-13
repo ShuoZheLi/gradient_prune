@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "response_analysis" / "scripts" / "qwen3_8b_wanda_response_analysis_multi_node.sh"
+SCRIPT = REPO_ROOT / "response_analysis" / "scripts" / "qwen3_8b_wanda_response_analysis_multi_node_sparsity_0d1.sh"
 
 
 def run_launcher_dry(tmp_path: Path, extra_env: dict[str, str]) -> Path:
@@ -45,9 +45,12 @@ def test_pruning_sparsity_default_is_defined_once_for_model_id(tmp_path: Path):
 
 
 def test_parallel_auto_disabled_without_slurm(tmp_path: Path):
-    config = parse_config(run_launcher_dry(tmp_path, {"PARALLEL_GENERATION": "auto", "PARALLEL_ENTROPY": "auto"}))
+    config = parse_config(run_launcher_dry(tmp_path, {"PARALLEL_GENERATION": "auto", "PARALLEL_ENTROPY": "auto", "DELETE_VLLM_PRUNED_MODEL": "1"}))
     assert config["PARALLEL_GENERATION"] == "0"
     assert config["PARALLEL_ENTROPY"] == "0"
+    assert config["GENERATION_BACKEND"] == "vllm"
+    assert config["VLLM_TENSOR_PARALLEL_SIZE"] == "1"
+    assert config["DELETE_VLLM_PRUNED_MODEL"] == "1"
 
 
 def test_parallel_auto_enabled_with_fake_multinode_slurm(tmp_path: Path):
