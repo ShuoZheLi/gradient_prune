@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 from response_analysis.io_utils import read_jsonl
 from response_analysis.metrics import answer_diversity, group_records, surface_diversity
@@ -13,14 +14,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute surface-form and final-answer diversity per prompt.")
     parser.add_argument("--input", default="outputs/generations.jsonl")
     parser.add_argument("--output", default="outputs/response_metrics.parquet")
+    parser.add_argument("--disable_tqdm", action="store_true", help="Disable the prompt-group progress bar.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     records = read_jsonl(args.input)
+    groups = group_records(records, ["model_id", "prompt_id"])
     rows = []
-    for key, group in group_records(records, ["model_id", "prompt_id"]).items():
+    iterator = tqdm(groups.items(), total=len(groups), desc="surface_diversity", unit="prompt", disable=args.disable_tqdm)
+    for key, group in iterator:
         model_id, prompt_id = key
         group = sorted(group, key=lambda row: row.get("sample_id", 0))
         texts = [str(row.get("generated_text", "")) for row in group]
