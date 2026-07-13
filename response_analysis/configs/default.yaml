@@ -1,0 +1,32 @@
+experiment_name: token_entropy_response_diversity
+outputs_dir: outputs
+models:
+  - model_id: qwen3_0_6b_unpruned
+    model_path: /data/shuozhe/saved_model/Qwen3-0.6B
+    pruning_sparsity: 0.0
+dataset:
+  path: /data/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet
+  prompt_key: prompt
+  response_key: null
+  max_examples: 500
+  debug_subset: null
+generation:
+  k: 16
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0
+  max_prompt_length: 2048
+  max_new_tokens: 2048
+  seed: 42
+  enable_thinking: "true"
+  use_cache: false
+entropy:
+  fixed_prefix_source: dataset_reference
+  dtype: auto
+semantic_judge:
+  model_env: OPENAI_EVALUATOR_MODEL
+  default_model: "@irom-ll37364-op-b37b3e/gpt-5.5"
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  shuffle_repeats: 2
+  cache_dir: outputs/api_cache
