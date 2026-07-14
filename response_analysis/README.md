@@ -89,6 +89,28 @@ python -m response_analysis.judge_strategy_diversity \
 
 Every request is hashed and cached under `outputs/api_cache`, so reruns do not make extra API calls. Use `--disable_api` to require cache hits only.
 
+## Process downloaded cluster results
+
+If the cluster run has already produced flat files such as `slurm-828229_qwen3_8b_resp_analysis_sparsity_0d1_generation.jsonl`, `*_on_policy_entropy.parquet`, and `*_fixed_prefix_entropy.parquet`, process all sparsity conditions together with:
+
+```bash
+source /data/shuozhe/miniconda3/etc/profile.d/conda.sh && conda activate verl
+export PYTHONPATH=/data/shuozhe/gradient_prune:$PYTHONPATH
+export OPENAI_API_KEY='...'
+export OPENAI_BASE_URL='https://api.portkey.ai/v1'
+export OPENAI_EVALUATOR_MODEL='@irom-ll37364-op-b37b3e/gpt-5.5'
+
+python -m response_analysis.process_existing_results \
+  --input_dir /data/shuozhe/gradient_prune/results/07_13_2026 \
+  --output_dir /data/shuozhe/gradient_prune/results/07_13_2026/processed \
+  --surface_workers 8 \
+  --judge_workers 8
+```
+
+The processor infers the intended condition from the filename, so a file named `sparsity_0d3` becomes `model_id=qwen3_8b_wanda_s0d3` and `pruning_sparsity=0.3` even if the downloaded rows still say `qwen3_8b_dense` and `0.0`. The original fields are preserved as `original_model_id` and `original_pruning_sparsity`.
+
+Progress bars are shown for condition processing, surface/answer diversity, and semantic judging. API calls are cached under `<output_dir>/api_cache`; rerun with `--disable_api` to verify that cached Portkey judgments are reused without network calls. For very long generations, surface edit distance is exact when `rapidfuzz` is installed; otherwise it is exact below `RESPONSE_ANALYSIS_MAX_EXACT_EDIT_CHARS` and uses a bounded token-sequence fallback above that threshold to avoid hanging on multi-thousand-token responses.
+
 ## Aggregate
 
 ```bash

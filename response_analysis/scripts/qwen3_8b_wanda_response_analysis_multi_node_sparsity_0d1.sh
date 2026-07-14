@@ -5,11 +5,11 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=4:00:00
+#SBATCH --time=6:00:00
 #SBATCH --output=slurm-%j_qwen3_8b_resp_analysis_sparsity_0d1.out
 #SBATCH --error=slurm-%j_qwen3_8b_resp_analysis_sparsity_0d1.err
 
-export OPENAI_API_KEY="oivQ6sAHMgWZh4UBLJ8MDHksL0PV"
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 export OPENAI_BASE_URL="https://api.portkey.ai/v1"
 export OPENAI_EVALUATOR_MODEL="@irom-ll37364-op-b37b3e/gpt-5.5"
 
@@ -107,14 +107,30 @@ PRUNED_MODEL_ID="${PRUNED_MODEL_ID:-qwen3_8b_wanda_s${PRUNING_SPARSITY}}"
 DATASET_PATH="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
 SCORE_ROOT="${SCORE_ROOT:-$RESULTS_BASE/qwen3_8b_wanda_math7500/scores}"
 
-RUN_DENSE="${RUN_DENSE:-1}"
-RUN_PRUNED="${RUN_PRUNED:-1}"
+if [[ -z "${RUN_DENSE+x}" ]]; then
+  if [[ "$PRUNING_SPARSITY" == "0" || "$PRUNING_SPARSITY" == "0.0" ]]; then
+    RUN_DENSE=1
+  else
+    RUN_DENSE=0
+  fi
+fi
+if [[ -z "${RUN_PRUNED+x}" ]]; then
+  if [[ "$PRUNING_SPARSITY" == "0" || "$PRUNING_SPARSITY" == "0.0" ]]; then
+    RUN_PRUNED=0
+  else
+    RUN_PRUNED=1
+  fi
+fi
+NO_API="${NO_API:-1}"
 RUN_GENERATION="${RUN_GENERATION:-1}"
 RUN_ON_POLICY_ENTROPY="${RUN_ON_POLICY_ENTROPY:-1}"
 RUN_FIXED_PREFIX_ENTROPY="${RUN_FIXED_PREFIX_ENTROPY:-1}"
 RUN_SURFACE_DIVERSITY="${RUN_SURFACE_DIVERSITY:-1}"
 RUN_SEMANTIC_JUDGE="${RUN_SEMANTIC_JUDGE:-1}"
 RUN_AGGREGATE="${RUN_AGGREGATE:-1}"
+if [[ "$NO_API" == "1" ]]; then
+  RUN_SEMANTIC_JUDGE=0
+fi
 PARALLEL_GENERATION="${PARALLEL_GENERATION:-auto}"
 PARALLEL_ENTROPY="${PARALLEL_ENTROPY:-auto}"
 
@@ -158,7 +174,11 @@ OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.portkey.ai/v1}"
 JUDGE_SHUFFLE_REPEATS="${JUDGE_SHUFFLE_REPEATS:-2}"
 JUDGE_MAX_PROMPTS="${JUDGE_MAX_PROMPTS:--1}"
 JUDGE_JSON_MODE="${JUDGE_JSON_MODE:-schema}"
-JUDGE_DISABLE_API="${JUDGE_DISABLE_API:-0}"
+if [[ "$NO_API" == "1" ]]; then
+  JUDGE_DISABLE_API="${JUDGE_DISABLE_API:-1}"
+else
+  JUDGE_DISABLE_API="${JUDGE_DISABLE_API:-0}"
+fi
 JUDGE_CACHE_DIR="${JUDGE_CACHE_DIR:-$RUN_ROOT/api_cache}"
 
 BOOTSTRAP_SAMPLES="${BOOTSTRAP_SAMPLES:-10000}"
@@ -221,11 +241,13 @@ DATASET_PATH=$DATASET_PATH
 SCORE_ROOT=$SCORE_ROOT
 RUN_DENSE=$RUN_DENSE
 RUN_PRUNED=$RUN_PRUNED
+NO_API=$NO_API
 RUN_GENERATION=$RUN_GENERATION
 RUN_ON_POLICY_ENTROPY=$RUN_ON_POLICY_ENTROPY
 RUN_FIXED_PREFIX_ENTROPY=$RUN_FIXED_PREFIX_ENTROPY
 RUN_SURFACE_DIVERSITY=$RUN_SURFACE_DIVERSITY
 RUN_SEMANTIC_JUDGE=$RUN_SEMANTIC_JUDGE
+JUDGE_DISABLE_API=$JUDGE_DISABLE_API
 RUN_AGGREGATE=$RUN_AGGREGATE
 PARALLEL_GENERATION=$PARALLEL_GENERATION
 PARALLEL_ENTROPY=$PARALLEL_ENTROPY
@@ -468,6 +490,51 @@ PY
   echo "[$(date)] Merged $mode entropy shards -> $output_parquet"
 }
 
+validate_generation_metadata() {
+  local generations="$1"
+  local model_id="$2"
+  local is_pruned="$3"
+  "$python_bin" - <<'VALIDATE_GENERATION_PY' "$generations" "$model_id" "$is_pruned" "$PRUNING_SPARSITY"
+from pathlib import Path
+import json
+import sys
+
+generations = Path(sys.argv[1])
+model_id = sys.argv[2]
+is_pruned = sys.argv[3] == "1"
+expected_sparsity = float(sys.argv[4])
+rows = 0
+bad = []
+for line in generations.open(encoding="utf-8"):
+    if not line.strip():
+        continue
+    rows += 1
+    record = json.loads(line)
+    pruning_info = record.get("pruning_info") or {}
+    actual_model_id = record.get("model_id")
+    actual_sparsity = float(record.get("pruning_sparsity") or 0.0)
+    enabled = bool(pruning_info.get("enabled", False))
+    if actual_model_id != model_id:
+        bad.append(f"row {rows}: model_id={actual_model_id!r}, expected {model_id!r}")
+    if is_pruned:
+        if expected_sparsity <= 0.0:
+            bad.append(f"row {rows}: pruned pipeline requested with nonpositive expected_sparsity={expected_sparsity}")
+        if not enabled:
+            bad.append(f"row {rows}: pruning_info.enabled is false for pruned pipeline")
+        if abs(actual_sparsity - expected_sparsity) > 1e-12:
+            bad.append(f"row {rows}: pruning_sparsity={actual_sparsity}, expected {expected_sparsity}")
+    else:
+        if enabled:
+            bad.append(f"row {rows}: pruning_info.enabled is true for dense pipeline")
+if rows == 0:
+    bad.append("generation file is empty")
+if bad:
+    preview = "\n".join(bad[:10])
+    raise SystemExit(f"Generation metadata validation failed for {generations}:\n{preview}")
+print(f"Validated {rows} generation rows for {model_id} (is_pruned={is_pruned}, expected_sparsity={expected_sparsity})")
+VALIDATE_GENERATION_PY
+}
+
 run_model_pipeline() {
   local model_id="$1"
   local output_dir="$2"
@@ -502,6 +569,7 @@ run_model_pipeline() {
       if [[ -n "$DEBUG_SUBSET" ]]; then serial_generation_args+=(--debug_subset "$DEBUG_SUBSET"); fi
       "$python_bin" -m response_analysis.generate_responses "${serial_generation_args[@]}"
     fi
+    validate_generation_metadata "$generations" "$model_id" "$is_pruned"
   fi
 
   if [[ "$is_pruned" == "1" && "$GENERATION_BACKEND" == "vllm" && "$DELETE_VLLM_PRUNED_MODEL" == "1" && "$RUN_GENERATION" == "1" ]]; then

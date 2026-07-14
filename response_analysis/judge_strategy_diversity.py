@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_prompts", type=int, default=-1)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max_retries", type=int, default=3)
+    parser.add_argument("--request_timeout", type=float, default=180.0, help="Per OpenAI-compatible API request timeout in seconds.")
     parser.add_argument("--shuffle_repeats", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--disable_api", action="store_true", help="Only read cached results; fail on cache miss.")
@@ -174,7 +175,7 @@ def call_openai(request_payload: dict[str, Any], args: argparse.Namespace) -> di
 
     from openai import OpenAI
 
-    client_kwargs: dict[str, Any] = {"api_key": args.api_key}
+    client_kwargs: dict[str, Any] = {"api_key": args.api_key, "timeout": getattr(args, "request_timeout", 180.0), "max_retries": 0}
     if args.base_url:
         client_kwargs["base_url"] = args.base_url
     client = OpenAI(**client_kwargs)

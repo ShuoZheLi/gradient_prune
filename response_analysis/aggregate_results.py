@@ -74,7 +74,9 @@ def paired_comparisons(per_prompt: pd.DataFrame, baseline_model: str | None, sam
         current = per_prompt[per_prompt["model_id"] == model].set_index("prompt_id")
         common = base.index.intersection(current.index)
         for metric in metrics:
-            diff = (current.loc[common, metric] - base.loc[common, metric]).dropna().to_numpy(dtype=float)
+            current_values = pd.to_numeric(current.loc[common, metric], errors="coerce").astype(float)
+            base_values = pd.to_numeric(base.loc[common, metric], errors="coerce").astype(float)
+            diff = (current_values - base_values).dropna().to_numpy(dtype=float)
             if diff.size == 0:
                 continue
             lo, hi = paired_bootstrap(diff, samples, seed)

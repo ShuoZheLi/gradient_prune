@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
@@ -10,6 +11,14 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import torch
+
+try:  # Optional native backend; exact and much faster for long generations.
+    from rapidfuzz.distance import Levenshtein as _rapidfuzz_levenshtein
+except Exception:  # pragma: no cover - depends on the local environment.
+    _rapidfuzz_levenshtein = None
+
+MAX_EXACT_EDIT_CHARS = int(os.getenv("RESPONSE_ANALYSIS_MAX_EXACT_EDIT_CHARS", "512"))
+MAX_APPROX_EDIT_TOKENS = int(os.getenv("RESPONSE_ANALYSIS_MAX_APPROX_EDIT_TOKENS", "256"))
 
 
 def stable_json_dumps(value: Any) -> str:
@@ -99,6 +108,14 @@ def levenshtein_distance(a: str, b: str) -> int:
 
 
 def normalized_edit_distance(a: str, b: str) -> float:
+    if _rapidfuzz_levenshtein is not None:
+        return float(_rapidfuzz_levenshtein.normalized_distance(a, b))
+    if len(a) * len(b) > MAX_EXACT_EDIT_CHARS * MAX_EXACT_EDIT_CHARS:
+        tokens_a = whitespace_tokens(a.lower())[:MAX_APPROX_EDIT_TOKENS]
+        tokens_b = whitespace_tokens(b.lower())[:MAX_APPROX_EDIT_TOKENS]
+        if tokens_a or tokens_b:
+            return 1.0 - SequenceMatcher(None, tokens_a, tokens_b, autojunk=True).ratio()
+        return 1.0 - SequenceMatcher(None, a[:MAX_EXACT_EDIT_CHARS], b[:MAX_EXACT_EDIT_CHARS], autojunk=True).ratio()
     denom = max(len(a), len(b), 1)
     return levenshtein_distance(a, b) / denom
 
