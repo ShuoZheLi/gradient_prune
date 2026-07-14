@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=qwen3_8b_resp_analysis
+#SBATCH --job-name=qwen3_8b_resp_analysis_sparsity_0d3
 #SBATCH --account=ASC24079
 #SBATCH --partition=gh
 #SBATCH --nodes=4
