@@ -2,10 +2,10 @@
 #SBATCH --job-name=qwen3_4b_align_sparsity_0
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
-#SBATCH --nodes=4
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=0:25:00
+#SBATCH --time=0:20:00
 #SBATCH --output=slurm-%j_qwen3_4b_align_sparsity_0.out
 #SBATCH --error=slurm-%j_qwen3_4b_align_sparsity_0.err
 
