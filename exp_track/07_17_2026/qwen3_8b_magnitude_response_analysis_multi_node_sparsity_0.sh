@@ -88,7 +88,7 @@ python_bin="${PYTHON_BIN:-python3}"
 # -----------------------------
 # Runtime config
 # -----------------------------
-RUN_NAME="${RUN_NAME:-qwen3_8b_wanda_response_analysis}"
+RUN_NAME="${RUN_NAME:-qwen3_8b_magnitude_response_analysis}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}_${RUN_TIMESTAMP}}"
 RESULTS_BASE="${RESULTS_BASE:-${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/results}}"
@@ -103,9 +103,9 @@ exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
 PRUNING_SPARSITY="${PRUNING_SPARSITY:-0.0}"
 BASE_MODEL_ID="${BASE_MODEL_ID:-qwen3_8b_dense}"
-PRUNED_MODEL_ID="${PRUNED_MODEL_ID:-qwen3_8b_wanda_s${PRUNING_SPARSITY}}"
+PRUNED_MODEL_ID="${PRUNED_MODEL_ID:-qwen3_8b_magnitude_s${PRUNING_SPARSITY}}"
 DATASET_PATH="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
-SCORE_ROOT="${SCORE_ROOT:-$RESULTS_BASE/qwen3_8b_wanda_math7500/scores}"
+SCORE_ROOT="${SCORE_ROOT:-$SCRATCH_ROOT/gradient_prune/results/qwen3_8b_magnitude_math7500/scores}"
 
 if [[ -z "${RUN_DENSE+x}" ]]; then
   if [[ "$PRUNING_SPARSITY" == "0" || "$PRUNING_SPARSITY" == "0.0" ]]; then
@@ -160,7 +160,7 @@ VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-}"
 DELETE_VLLM_PRUNED_MODEL="${DELETE_VLLM_PRUNED_MODEL:-1}"
 
-PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-}"
+PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-magnitude}"
 PRUNE_GRANULARITY="${PRUNE_GRANULARITY:-rowwise}"
 PRUNE_LAMBDA="${PRUNE_LAMBDA:-}"
 PRUNE_OPS="${PRUNE_OPS:-}"
