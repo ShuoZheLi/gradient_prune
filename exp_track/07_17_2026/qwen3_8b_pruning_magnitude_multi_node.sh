@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qwen3_8b_score_magnitude
-#SBATCH --account=ASC24079
+#SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
