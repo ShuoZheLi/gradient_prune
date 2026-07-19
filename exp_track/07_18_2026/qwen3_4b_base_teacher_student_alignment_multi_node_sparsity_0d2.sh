@@ -5,7 +5,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=1:00:00
+#SBATCH --time=00:25:00
 #SBATCH --output=slurm-%j_qwen3_4b_align_sparsity_0d2.out
 #SBATCH --error=slurm-%j_qwen3_4b_align_sparsity_0d2.err
 
