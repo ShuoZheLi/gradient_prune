@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=collect_qwen2d5_7b_instruct_math7500
+#SBATCH --job-name=collect_qwen2d5_math_7b_instruct_math7500
 #SBATCH --account=ASC24079
 #SBATCH --partition=gh
 #SBATCH --nodes=4
@@ -7,8 +7,8 @@
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
 #SBATCH --time=4:00:00
-#SBATCH --output=slurm-%j_collect_qwen2d5_7b_instruct_math7500.out
-#SBATCH --error=slurm-%j_collect_qwen2d5_7b_instruct_math7500.err
+#SBATCH --output=slurm-%j_collect_qwen2d5_math_7b_instruct_math7500.out
+#SBATCH --error=slurm-%j_collect_qwen2d5_math_7b_instruct_math7500.err
 
 set -euo pipefail
 
@@ -81,19 +81,19 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # -----------------------------
 # Paths and collection config
 # -----------------------------
-RUN_NAME="${RUN_NAME:-collect_qwen2d5_7b_instruct_math7500}"
+RUN_NAME="${RUN_NAME:-collect_qwen2d5_math_7b_instruct_math7500}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
 
-model_path="${MODEL_PATH:-/work/09576/shuozhe/saved_model/Qwen2.5-7B-Instruct}"
+model_path="${MODEL_PATH:-/work/09576/shuozhe/saved_model/Qwen2.5-Math-7B/Qwen2.5-Math-7B-Instruct}"
 dataset_path="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/math7500.parquet}"
-output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen2d5-7b-instruct_math7500_correct}"
+output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen2d5-math-7b-instruct_math7500_correct}"
 raw_jsonl="${RAW_JSONL:-$output_dir/raw_actor_responses.jsonl}"
 shard_dir="${SHARD_DIR:-$output_dir/shards}"
 log_dir="${LOG_DIR:-$output_dir/logs/${RUN_ID}}"
 all_trajectories_jsonl="${ALL_TRAJECTORIES_JSONL:-$output_dir/all_actor_trajectories.jsonl}"
 all_trajectories_parquet="${ALL_TRAJECTORIES_PARQUET:-$output_dir/all_actor_trajectories.parquet}"
 correct_jsonl="${CORRECT_JSONL:-$output_dir/correct_actor_responses.jsonl}"
-calib_parquet="${CALIB_PARQUET:-$output_dir/qwen2d5-7b-instruct_math7500_correct.parquet}"
+calib_parquet="${CALIB_PARQUET:-$output_dir/qwen2d5-math-7b-instruct_math7500_correct.parquet}"
 metrics_json="${METRICS_JSON:-$output_dir/metrics.json}"
 
 max_examples="${MAX_EXAMPLES:-7500}"
