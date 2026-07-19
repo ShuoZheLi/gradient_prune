@@ -91,7 +91,7 @@ RESULTS_BASE="${RESULTS_BASE:-${RESULTS_ROOT:-$SCRATCH_ROOT/gradient_prune/resul
 RESULTS_SUBDIR="${RESULTS_SUBDIR:-$EXPERIMENT_NAME}"
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$RESULTS_BASE/$RESULTS_SUBDIR}"
 RESULTS_ROOT="${RUN_OUTPUT_DIR:-$EXPERIMENT_ROOT/runs/${RUN_ID}}"
-LOAD_SCORES="${LOAD_SCORES:-true}"
+LOAD_SCORES="${LOAD_SCORES:-false}"
 SHARED_SCORE_ROOT="${SHARED_SCORE_ROOT:-$EXPERIMENT_ROOT/scores}"
 if [[ "$LOAD_SCORES" == "true" ]]; then
   SCORE_ROOT="${SCORE_ROOT:-$SHARED_SCORE_ROOT}"
@@ -328,7 +328,7 @@ heldout_ce:
   max_length: 18432
 
 text_ppl:
-  enabled: true
+  enabled: false
   backend: vllm
   dataset_name: wikitext
   dataset_config: wikitext-2-raw-v1
@@ -345,7 +345,7 @@ text_ppl:
   max_length: 18432
 
 task_accuracy:
-  enabled: true
+  enabled: false
   dataset_path: /work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet
   backend: vllm
   max_examples: null
@@ -463,12 +463,13 @@ merge_runner_args=(
   --merge-only
 )
 
-# This WANDA sweep loads precomputed scores, so there is no distributed
-# calibration work left to do. Use all allocated nodes as independent condition
-# evaluators by default. Set PREP_WITH_TORCHRUN=1 only for configs that need
-# multi-node gradient/activation collection before the sweep.
-PREP_WITH_TORCHRUN="${PREP_WITH_TORCHRUN:-0}"
-SHARDED_EVAL="${SHARDED_EVAL:-1}"
+# This launcher is for generating reusable WANDA score files from the Chinese
+# calibration text. By default it runs only the prep/scoring phase and writes
+# score tensors plus metadata under $SCORE_ROOT. Set SCORE_ONLY=0 explicitly if
+# you also want to continue into the expensive prune/evaluation sweep.
+PREP_WITH_TORCHRUN="${PREP_WITH_TORCHRUN:-1}"
+SCORE_ONLY="${SCORE_ONLY:-1}"
+SHARDED_EVAL="${SHARDED_EVAL:-0}"
 
 # -----------------------------
 # Debug info
@@ -496,7 +497,7 @@ echo "[prune] python=$(command -v python3 || command -v python || true)"
 printf '[prune] command:'
 printf ' %q' torchrun "${torchrun_args[@]}" "${prep_runner_args[@]}"
 printf '\n'
-echo "[prune] prep_with_torchrun=$PREP_WITH_TORCHRUN sharded_eval=$SHARDED_EVAL"
+echo "[prune] prep_with_torchrun=$PREP_WITH_TORCHRUN score_only=$SCORE_ONLY sharded_eval=$SHARDED_EVAL"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[prune] dry run complete; no pruning launched."
@@ -511,6 +512,11 @@ if [[ "$PREP_WITH_TORCHRUN" == "1" ]]; then
   else
     torchrun --standalone --nnodes=1 --nproc-per-node="$nproc_per_node" "${prep_runner_args[@]}"
   fi
+fi
+
+if [[ "$SCORE_ONLY" == "1" ]]; then
+  echo "[prune] score generation complete; WANDA scores saved under: $SCORE_ROOT"
+  exit 0
 fi
 
 if [[ "$SHARDED_EVAL" == "1" ]]; then
