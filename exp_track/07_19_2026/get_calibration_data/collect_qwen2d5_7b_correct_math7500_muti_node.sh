@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=collect_qwen2d5_7b_instruct_math7500
-#SBATCH --account=ASC24079
-#SBATCH --partition=gh
+#SBATCH --account=ASC26008
+#SBATCH --partition=gh-dev
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.

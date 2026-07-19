@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=collect_qwen2d5_math_7b_instruct_math7500
-#SBATCH --account=ASC24079
+#SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
