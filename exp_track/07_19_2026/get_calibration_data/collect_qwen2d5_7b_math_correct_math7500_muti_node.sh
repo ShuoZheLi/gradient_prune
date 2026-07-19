@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
-#SBATCH --time=2:00:00
+#SBATCH --time=2:30:00
 #SBATCH --output=slurm-%j_collect_qwen2d5_math_7b_instruct_math7500.out
 #SBATCH --error=slurm-%j_collect_qwen2d5_math_7b_instruct_math7500.err
 
@@ -102,7 +102,7 @@ seed="${SEED:-42}"
 max_prompt_length="${MAX_PROMPT_LENGTH:-2048}"
 max_new_tokens="${MAX_NEW_TOKENS:-16384}"
 generation_backend="${GENERATION_BACKEND:-vllm}"
-batch_size="${BATCH_SIZE:-64}"
+batch_size="${BATCH_SIZE:-32}"
 generation_max_batch_tokens="${GENERATION_MAX_BATCH_TOKENS:-0}"
 response_log_max="${RESPONSE_LOG_MAX:--1}"
 num_responses_per_prompt="${NUM_RESPONSES_PER_PROMPT:-1}"
