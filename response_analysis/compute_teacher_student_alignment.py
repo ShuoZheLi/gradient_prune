@@ -39,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="vLLM tensor parallel size.")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9, help="vLLM GPU memory utilization.")
     parser.add_argument("--vllm_max_model_len", type=int, default=None, help="Override vLLM max_model_len.")
+    parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None, help="Cap vLLM scheduled tokens per step; useful for prompt_logprobs memory.")
+    parser.add_argument("--vllm_max_num_seqs", type=int, default=None, help="Cap concurrently scheduled vLLM sequences.")
     parser.add_argument("--enforce_eager", action=argparse.BooleanOptionalAction, default=True, help="Use vLLM eager execution.")
     parser.add_argument("--seed", type=int, default=42, help="vLLM sampling seed.")
     return parser.parse_args()
@@ -360,15 +362,20 @@ def score_records_vllm(tokenizer: Any, records: Sequence[dict[str, Any]], args: 
             f"but max_model_len is {max_model_len}. Increase --vllm_max_model_len."
         )
 
-    llm = LLM(
-        model=str(args.model_path),
-        tensor_parallel_size=int(args.tensor_parallel_size),
-        gpu_memory_utilization=float(args.gpu_memory_utilization),
-        dtype=resolve_vllm_dtype(args.dtype),
-        trust_remote_code=bool(args.trust_remote_code),
-        enforce_eager=bool(args.enforce_eager),
-        max_model_len=int(max_model_len),
-    )
+    llm_kwargs = {
+        "model": str(args.model_path),
+        "tensor_parallel_size": int(args.tensor_parallel_size),
+        "gpu_memory_utilization": float(args.gpu_memory_utilization),
+        "dtype": resolve_vllm_dtype(args.dtype),
+        "trust_remote_code": bool(args.trust_remote_code),
+        "enforce_eager": bool(args.enforce_eager),
+        "max_model_len": int(max_model_len),
+    }
+    if args.vllm_max_num_batched_tokens is not None:
+        llm_kwargs["max_num_batched_tokens"] = int(args.vllm_max_num_batched_tokens)
+    if args.vllm_max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = int(args.vllm_max_num_seqs)
+    llm = LLM(**llm_kwargs)
     sampling = SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=1, seed=int(args.seed))
     batch_size = max(int(args.batch_size), 1)
     for start in tqdm(range(0, len(scorable), batch_size), desc="teacher-student alignment:vllm"):

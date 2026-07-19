@@ -104,10 +104,14 @@ BACKEND="${BACKEND:-vllm}"
 DTYPE="${DTYPE:-fp16}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
-MAX_SEQUENCE_LENGTH="${MAX_SEQUENCE_LENGTH:-}"
+# Optional full trajectory cap in student-tokenizer tokens for prompt + generated_text.
+# Empty means score every trajectory. If set, overlength rows are skipped, not truncated.
+MAX_SEQUENCE_LENGTH="${MAX_SEQUENCE_LENGTH:-${MAX_TRAJECTORY_TOKENS:-}}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 DEBUG_SUBSET="${DEBUG_SUBSET:-${MAX_EXAMPLES:--1}}"
 SHARD_COUNT="${SHARD_COUNT:-auto}"
@@ -166,6 +170,8 @@ BATCH_SIZE=$BATCH_SIZE
 TENSOR_PARALLEL_SIZE=$TENSOR_PARALLEL_SIZE
 GPU_MEMORY_UTILIZATION=$GPU_MEMORY_UTILIZATION
 VLLM_MAX_MODEL_LEN=$VLLM_MAX_MODEL_LEN
+VLLM_MAX_NUM_BATCHED_TOKENS=$VLLM_MAX_NUM_BATCHED_TOKENS
+VLLM_MAX_NUM_SEQS=$VLLM_MAX_NUM_SEQS
 ENFORCE_EAGER=$ENFORCE_EAGER
 MAX_SEQUENCE_LENGTH=$MAX_SEQUENCE_LENGTH
 TRUST_REMOTE_CODE=$TRUST_REMOTE_CODE
@@ -254,6 +260,8 @@ build_alignment_args() {
   else
     args+=(--tensor_parallel_size "$TENSOR_PARALLEL_SIZE" --gpu_memory_utilization "$GPU_MEMORY_UTILIZATION")
     if [[ -n "$VLLM_MAX_MODEL_LEN" ]]; then args+=(--vllm_max_model_len "$VLLM_MAX_MODEL_LEN"); fi
+    if [[ -n "$VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then args+=(--vllm_max_num_batched_tokens "$VLLM_MAX_NUM_BATCHED_TOKENS"); fi
+    if [[ -n "$VLLM_MAX_NUM_SEQS" ]]; then args+=(--vllm_max_num_seqs "$VLLM_MAX_NUM_SEQS"); fi
     if [[ "$ENFORCE_EAGER" == "1" ]]; then args+=(--enforce_eager); else args+=(--no-enforce_eager); fi
   fi
   if [[ -n "$MAX_SEQUENCE_LENGTH" ]]; then args+=(--max_sequence_length "$MAX_SEQUENCE_LENGTH" --skip_overlength); fi
