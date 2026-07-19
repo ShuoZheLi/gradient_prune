@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
-#SBATCH --time=4:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=slurm-%j_collect_qwen2d5_math_7b_instruct_math7500.out
 #SBATCH --error=slurm-%j_collect_qwen2d5_math_7b_instruct_math7500.err
 
