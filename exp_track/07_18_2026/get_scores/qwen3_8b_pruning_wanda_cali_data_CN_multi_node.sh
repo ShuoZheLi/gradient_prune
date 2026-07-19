@@ -105,9 +105,23 @@ exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 
 CONFIG_FILE="${CONFIG_FILE:-$LOG_DIR/config.yaml}"
 CHINESE_CALIBRATION_PATH="${CHINESE_CALIBRATION_PATH:-$LOG_DIR/chinese_calibration_text.jsonl}"
+CHINESE_CALIBRATION_SOURCE="${CHINESE_CALIBRATION_SOURCE:-hf_c4_zh}"
+CHINESE_CALIBRATION_DATASET="${CHINESE_CALIBRATION_DATASET:-allenai/c4}"
+CHINESE_CALIBRATION_DATASET_CONFIG="${CHINESE_CALIBRATION_DATASET_CONFIG:-zh}"
+CHINESE_CALIBRATION_SPLIT="${CHINESE_CALIBRATION_SPLIT:-train}"
+CHINESE_CALIBRATION_TEXT_KEY="${CHINESE_CALIBRATION_TEXT_KEY:-text}"
+CHINESE_CALIBRATION_NUM_SAMPLES="${CHINESE_CALIBRATION_NUM_SAMPLES:-512}"
+CHINESE_CALIBRATION_MIN_CHARS="${CHINESE_CALIBRATION_MIN_CHARS:-200}"
+CHINESE_CALIBRATION_MAX_CHARS="${CHINESE_CALIBRATION_MAX_CHARS:-4096}"
+CHINESE_CALIBRATION_SHUFFLE_BUFFER="${CHINESE_CALIBRATION_SHUFFLE_BUFFER:-10000}"
+ALLOW_CHINESE_CALIBRATION_FALLBACK="${ALLOW_CHINESE_CALIBRATION_FALLBACK:-0}"
 mkdir -p "$(dirname -- "$CHINESE_CALIBRATION_PATH")"
+export CHINESE_CALIBRATION_PATH CHINESE_CALIBRATION_DATASET CHINESE_CALIBRATION_DATASET_CONFIG \
+  CHINESE_CALIBRATION_SPLIT CHINESE_CALIBRATION_TEXT_KEY CHINESE_CALIBRATION_NUM_SAMPLES \
+  CHINESE_CALIBRATION_MIN_CHARS CHINESE_CALIBRATION_MAX_CHARS CHINESE_CALIBRATION_SHUFFLE_BUFFER
 
-cat > "$CHINESE_CALIBRATION_PATH" <<'JSONL'
+write_embedded_chinese_calibration() {
+  cat > "$CHINESE_CALIBRATION_PATH" <<'JSONL'
 {"text":"北京市位于华北平原北部，是中华人民共和国的首都。北京有三千多年建城史和八百多年建都史，故宫、天坛、颐和园等古迹见证了城市的历史变迁。今天的北京也是全国政治、文化、国际交往和科技创新中心，地铁、高铁与航空网络把城市同全国各地紧密连接。"}
 {"text":"长江发源于青藏高原，流经中国西部、中部和东部多个省市，最终注入东海。长江流域水系发达，土地肥沃，孕育了丰富的农业、航运和城市文明。三峡、洞庭湖、鄱阳湖以及长江三角洲共同构成了多样的自然与经济景观。"}
 {"text":"春节是中国最重要的传统节日之一。节日前，人们常常打扫房屋、置办年货、贴春联和窗花；除夕夜，全家团聚吃年夜饭，守岁迎新。春节期间，拜年、发红包、舞龙舞狮和逛庙会等习俗表达了人们辞旧迎新、祝愿平安的心情。"}
@@ -115,6 +129,117 @@ cat > "$CHINESE_CALIBRATION_PATH" <<'JSONL'
 {"text":"现代农业越来越重视科学管理。农民可以利用土壤检测、气象预报、节水灌溉和病虫害监测来安排播种、施肥与收获。电子商务和冷链物流的发展，也帮助新鲜农产品更快进入城市市场，提高了乡村产业的组织效率。"}
 {"text":"人工智能技术正在改变学习、科研和生产方式。语言模型可以辅助阅读、翻译、写作和程序开发，但可靠使用仍需要明确问题、核对事实、保护隐私，并由人类对关键决策负责。技术进步应当服务于人的创造力、教育机会和社会福祉。"}
 JSONL
+}
+
+if [[ "$CHINESE_CALIBRATION_SOURCE" == "embedded" ]]; then
+  write_embedded_chinese_calibration
+else
+  if ! python3 - <<'CHINESE_CALIBRATION_PY'; then
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+from datasets import load_dataset
+
+output_path = Path(os.environ["CHINESE_CALIBRATION_PATH"])
+dataset_name = os.environ["CHINESE_CALIBRATION_DATASET"]
+dataset_config = os.environ["CHINESE_CALIBRATION_DATASET_CONFIG"] or None
+split = os.environ["CHINESE_CALIBRATION_SPLIT"]
+text_key = os.environ["CHINESE_CALIBRATION_TEXT_KEY"]
+target_samples = int(os.environ["CHINESE_CALIBRATION_NUM_SAMPLES"])
+min_chars = int(os.environ["CHINESE_CALIBRATION_MIN_CHARS"])
+max_chars = int(os.environ["CHINESE_CALIBRATION_MAX_CHARS"])
+shuffle_buffer = int(os.environ["CHINESE_CALIBRATION_SHUFFLE_BUFFER"])
+seed = int(os.environ.get("SEED", "42"))
+
+cjk_pattern = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+whitespace_pattern = re.compile(r"\s+")
+noisy_terms = (
+    "走势图",
+    "送彩金",
+    "中大奖",
+    "博彩",
+    "现金网",
+    "老虎机",
+    "北京赛车",
+    "六合彩",
+    "特码",
+    "必中",
+    "彩票",
+    "开奖结果",
+    "免费资料",
+    "赌博",
+)
+
+
+def normalize_text(value: object) -> str:
+    text = str(value).replace("\r", "\n").replace("\ufeff", "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return whitespace_pattern.sub(" ", "\n".join(lines)).strip()
+
+
+def is_good_chinese_text(text: str) -> bool:
+    if len(text) < min_chars:
+        return False
+    if "�" in text or "锘" in text:
+        return False
+    if any(term in text for term in noisy_terms):
+        return False
+    cjk_count = len(cjk_pattern.findall(text))
+    if cjk_count < min_chars * 0.6:
+        return False
+    if cjk_count / max(len(text), 1) < 0.45:
+        return False
+    unique_ratio = len(set(text)) / max(len(text), 1)
+    return unique_ratio >= 0.02
+
+
+kwargs = {"path": dataset_name, "split": split, "streaming": True}
+if dataset_config:
+    kwargs["name"] = dataset_config
+dataset = load_dataset(**kwargs)
+if shuffle_buffer > 0:
+    dataset = dataset.shuffle(seed=seed, buffer_size=shuffle_buffer)
+
+written = 0
+seen = 0
+output_path.parent.mkdir(parents=True, exist_ok=True)
+with output_path.open("w", encoding="utf-8") as handle:
+    for row in dataset:
+        seen += 1
+        text = normalize_text(row.get(text_key, ""))
+        if not is_good_chinese_text(text):
+            continue
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip()
+        handle.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+        written += 1
+        if written >= target_samples:
+            break
+
+if written < target_samples:
+    raise RuntimeError(
+        f"Only wrote {written}/{target_samples} Chinese calibration samples "
+        f"from {dataset_name}/{dataset_config or ''} after scanning {seen} rows."
+    )
+print(
+    f"[prune] wrote {written} Chinese calibration samples to {output_path} "
+    f"from Hugging Face dataset {dataset_name} config={dataset_config} split={split}",
+    file=sys.stderr,
+)
+CHINESE_CALIBRATION_PY
+    if [[ "$ALLOW_CHINESE_CALIBRATION_FALLBACK" == "1" ]]; then
+      echo "[prune] Falling back to embedded Chinese calibration text." >&2
+      write_embedded_chinese_calibration
+    else
+      echo "[prune] Failed to create Chinese calibration data from Hugging Face." >&2
+      echo "[prune] Set ALLOW_CHINESE_CALIBRATION_FALLBACK=1 to use the embedded 6-row fallback, or CHINESE_CALIBRATION_SOURCE=embedded explicitly." >&2
+      exit 4
+    fi
+  fi
+fi
 export CHINESE_CALIBRATION_PATH
 
 MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
