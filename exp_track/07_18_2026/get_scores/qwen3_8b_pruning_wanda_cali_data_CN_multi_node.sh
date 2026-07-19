@@ -104,6 +104,18 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 
 CONFIG_FILE="${CONFIG_FILE:-$LOG_DIR/config.yaml}"
+CHINESE_CALIBRATION_PATH="${CHINESE_CALIBRATION_PATH:-$LOG_DIR/chinese_calibration_text.jsonl}"
+mkdir -p "$(dirname -- "$CHINESE_CALIBRATION_PATH")"
+
+cat > "$CHINESE_CALIBRATION_PATH" <<'JSONL'
+{"text":"北京市位于华北平原北部，是中华人民共和国的首都。北京有三千多年建城史和八百多年建都史，故宫、天坛、颐和园等古迹见证了城市的历史变迁。今天的北京也是全国政治、文化、国际交往和科技创新中心，地铁、高铁与航空网络把城市同全国各地紧密连接。"}
+{"text":"长江发源于青藏高原，流经中国西部、中部和东部多个省市，最终注入东海。长江流域水系发达，土地肥沃，孕育了丰富的农业、航运和城市文明。三峡、洞庭湖、鄱阳湖以及长江三角洲共同构成了多样的自然与经济景观。"}
+{"text":"春节是中国最重要的传统节日之一。节日前，人们常常打扫房屋、置办年货、贴春联和窗花；除夕夜，全家团聚吃年夜饭，守岁迎新。春节期间，拜年、发红包、舞龙舞狮和逛庙会等习俗表达了人们辞旧迎新、祝愿平安的心情。"}
+{"text":"中国古典诗词讲究意境、音韵和凝练的表达。诗人常借山水、明月、风雨、花木等意象抒发情感，也通过边塞、田园、送别和怀古等题材记录社会生活。唐诗和宋词在汉语文学史上影响深远，至今仍被广泛诵读和研究。"}
+{"text":"现代农业越来越重视科学管理。农民可以利用土壤检测、气象预报、节水灌溉和病虫害监测来安排播种、施肥与收获。电子商务和冷链物流的发展，也帮助新鲜农产品更快进入城市市场，提高了乡村产业的组织效率。"}
+{"text":"人工智能技术正在改变学习、科研和生产方式。语言模型可以辅助阅读、翻译、写作和程序开发，但可靠使用仍需要明确问题、核对事实、保护隐私，并由人类对关键决策负责。技术进步应当服务于人的创造力、教育机会和社会福祉。"}
+JSONL
+export CHINESE_CALIBRATION_PATH
 
 MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
 if [[ "$DRY_RUN" != "1" && ! -d "$MODEL_PATH" ]]; then
@@ -148,10 +160,10 @@ hybrid:
   # lambda_values: [0.001, 0.01, 0.1, 1.0, 10.0]
 
 calibration:
-  type: prompt_response
-  path: /work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct
-  only_correct: true
-  loss_on: full_trajectory
+  type: text
+  path: __CHINESE_CALIBRATION_PATH__
+  only_correct: false
+  loss_on: full_text
   max_samples: null
   microbatch_size: 16
   fisher_estimator: per_example
@@ -238,6 +250,7 @@ output:
 YAML
 
 python3 - "$CONFIG_FILE" "$RESULTS_ROOT" "$MODEL_PATH" "$SCORE_ROOT" "$EXPERIMENT_NAME" "$LOAD_SCORES" <<'CONFIG_PATH_PY'
+import os
 import sys
 from pathlib import Path
 config_path = Path(sys.argv[1])
@@ -246,12 +259,14 @@ model_path = sys.argv[3]
 score_root = sys.argv[4]
 experiment_name = sys.argv[5]
 load_scores = sys.argv[6]
+chinese_calibration_path = Path(os.environ["CHINESE_CALIBRATION_PATH"]).resolve().as_posix()
 text = config_path.read_text()
 text = text.replace("__RESULTS_ROOT__", results_root)
 text = text.replace("__MODEL_PATH__", model_path)
 text = text.replace("__SCORE_ROOT__", score_root)
 text = text.replace("__EXPERIMENT_NAME__", experiment_name)
 text = text.replace("__LOAD_SCORES__", load_scores)
+text = text.replace("__CHINESE_CALIBRATION_PATH__", chinese_calibration_path)
 config_path.write_text(text)
 CONFIG_PATH_PY
 
