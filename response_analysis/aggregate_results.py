@@ -152,6 +152,9 @@ def main() -> None:
     aggregate = per_prompt.groupby("model_id", as_index=False)[numeric_cols].mean() if not per_prompt.empty else pd.DataFrame()
     summary_order = [
         "model_id",
+        "pass_at_1",
+        "pass_at_k",
+        "avg_at_k",
         "accuracy",
         "token_entropy_mean",
         "fixed_prefix_token_entropy_mean",

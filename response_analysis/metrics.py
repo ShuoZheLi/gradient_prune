@@ -157,8 +157,9 @@ def answer_diversity(answers: Sequence[str | None], correctness: Sequence[bool |
     valid_answers = [answer for answer in answers if answer is not None and str(answer) != ""]
     valid_entropy = categorical_entropy(valid_answers, ignore_none=False)
     correct_values = [bool(value) for value in correctness] if correctness is not None else []
+    pass_at_1 = float(correct_values[0]) if correct_values else 0.0
     pass_at_k = float(any(correct_values)) if correct_values else 0.0
-    accuracy = float(np.mean(correct_values)) if correct_values else 0.0
+    avg_at_k = float(np.mean(correct_values)) if correct_values else 0.0
     return {
         "answer_entropy_all": all_entropy,
         "answer_entropy_valid": valid_entropy,
@@ -166,8 +167,10 @@ def answer_diversity(answers: Sequence[str | None], correctness: Sequence[bool |
         "num_unique_answers": float(len(set(valid_answers))),
         "effective_num_answers": effective_count(all_entropy) if answers else 0.0,
         "valid_parse_rate": (len(valid_answers) / len(answers)) if answers else 0.0,
-        "accuracy": accuracy,
+        "accuracy": avg_at_k,
+        "pass_at_1": pass_at_1,
         "pass_at_k": pass_at_k,
+        "avg_at_k": avg_at_k,
     }
 
 

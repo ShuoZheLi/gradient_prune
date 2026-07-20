@@ -24,6 +24,9 @@ def test_identical_responses_zero_answer_and_strategy_entropy():
     strategy_metrics = strategy_diversity([0, 0, 0], [True, True, True])
     assert answer_metrics["answer_entropy"] == 0.0
     assert answer_metrics["effective_num_answers"] == 1.0
+    assert answer_metrics["pass_at_1"] == 1.0
+    assert answer_metrics["pass_at_k"] == 1.0
+    assert answer_metrics["avg_at_k"] == 1.0
     assert strategy_metrics["strategy_entropy"] == 0.0
     assert strategy_metrics["effective_num_strategies"] == 1.0
 
@@ -44,3 +47,11 @@ def test_response_order_permutation_preserves_diversity_metrics():
     assert surface_diversity(responses) == surface_diversity([responses[i] for i in perm])
     assert answer_diversity(answers) == answer_diversity([answers[i] for i in perm])
     assert strategy_diversity(clusters) == strategy_diversity([clusters[i] for i in perm])
+
+
+def test_answer_diversity_reports_pass_and_avg_at_k():
+    metrics = answer_diversity(["1", "2", "3"], [False, True, False])
+    assert metrics["pass_at_1"] == 0.0
+    assert metrics["pass_at_k"] == 1.0
+    assert metrics["avg_at_k"] == 1 / 3
+    assert metrics["accuracy"] == metrics["avg_at_k"]
