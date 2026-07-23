@@ -27,11 +27,11 @@ if command -v module >/dev/null 2>&1; then
   module load nvidia/25.9
 fi
 
-# shellcheck disable=SC1091
-set +u
-source /data/shuozhe/miniconda3/etc/profile.d/conda.sh
-conda activate verl
-set -u
+VENV="${VENV:-/work/09576/shuozhe/verl_setup_tacc/.venv}"
+if [[ -d "$VENV" ]]; then
+  # shellcheck disable=SC1091
+  source "${VENV}/bin/activate"
+fi
 
 find_repo_root() {
   local start_dir="$1"
