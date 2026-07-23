@@ -5,7 +5,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=6:00:00
+#SBATCH --time=5:00:00
 #SBATCH --output=slurm-%j_qwen3_4b_base_aime242526_resp.out
 #SBATCH --error=slurm-%j_qwen3_4b_base_aime242526_resp.err
 
