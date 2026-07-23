@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
+import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -13,6 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from response_analysis.io_utils import read_jsonl, write_jsonl
 from response_analysis.metrics import selected_logprobs_from_logits
+from response_analysis.pruning import apply_score_pruning
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +31,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--per_example_output", default=None)
     parser.add_argument("--aggregate_output", default=None)
     parser.add_argument("--model_id", default=None)
+    parser.add_argument("--pruning_sparsity", type=float, default=0.0)
+    parser.add_argument("--prune_score_dir", default=None, help="Directory containing saved per-module score .pt files plus metadata.json.")
+    parser.add_argument("--prune_score_key", default=None, help="Score key inside each .pt file; inferred from metadata for WANDA score dirs.")
+    parser.add_argument("--prune_granularity", choices=["rowwise", "layerwise"], default="rowwise")
+    parser.add_argument("--prune_ops", default=None, nargs="*", help="Optional prunable op suffixes, e.g. q_proj k_proj v_proj o_proj gate_proj up_proj down_proj.")
+    parser.add_argument("--prune_lambda", type=float, default=None)
     parser.add_argument("--backend", choices=["hf", "vllm"], default="hf")
+    parser.add_argument("--vllm_pruned_model_dir", default=None, help="HF checkpoint dir used when vLLM must load a score-pruned model.")
+    parser.add_argument("--vllm_pruned_checkpoint_timeout", type=int, default=7200)
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for vLLM scoring.")
     parser.add_argument("--max_examples", type=int, default=-1)
     parser.add_argument("--max_sequence_length", type=int, default=None, help="Fail or skip examples longer than this many tokens.")
@@ -52,6 +63,84 @@ def resolve_dtype(name: str) -> str | torch.dtype:
 
 def resolve_vllm_dtype(name: str) -> str:
     return {"auto": "auto", "bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}[name]
+
+
+def has_hf_checkpoint(path: str | Path) -> bool:
+    path = Path(path)
+    if not (path / "config.json").is_file():
+        return False
+    return any(path.glob("*.safetensors")) or any(path.glob("pytorch_model*.bin")) or any(path.glob("model*.safetensors"))
+
+
+def default_vllm_pruned_model_dir(args: argparse.Namespace) -> Path:
+    output_path = Path(args.output_dir)
+    model_name = Path(args.model_path).name or "model"
+    return output_path / f"vllm_pruned_{model_name}_s{args.pruning_sparsity:g}"
+
+
+def wait_for_checkpoint(path: Path, timeout_seconds: int) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if has_hf_checkpoint(path):
+            return
+        time.sleep(10)
+    raise TimeoutError(f"Timed out waiting for pruned checkpoint: {path}")
+
+
+def prepare_vllm_model_path(args: argparse.Namespace, tokenizer: Any) -> tuple[str, dict[str, Any]]:
+    if not args.prune_score_dir or float(args.pruning_sparsity) <= 0.0:
+        return args.model_path, {
+            "enabled": False,
+            "requested_sparsity": float(args.pruning_sparsity),
+            "actual_sparsity": 0.0,
+            "num_pruned_weights": 0,
+            "num_total_prunable_weights": 0,
+        }
+
+    pruned_dir = Path(args.vllm_pruned_model_dir) if args.vllm_pruned_model_dir else default_vllm_pruned_model_dir(args)
+    lock_dir = Path(str(pruned_dir) + ".lock")
+    if has_hf_checkpoint(pruned_dir):
+        return str(pruned_dir), {"enabled": True, "vllm_pruned_model_dir": str(pruned_dir), "checkpoint_reused": True, "requested_sparsity": float(args.pruning_sparsity)}
+
+    acquired = False
+    try:
+        os.makedirs(lock_dir)
+        acquired = True
+    except FileExistsError:
+        wait_for_checkpoint(pruned_dir, args.vllm_pruned_checkpoint_timeout)
+        return str(pruned_dir), {"enabled": True, "vllm_pruned_model_dir": str(pruned_dir), "checkpoint_reused": True, "requested_sparsity": float(args.pruning_sparsity)}
+
+    try:
+        if has_hf_checkpoint(pruned_dir):
+            return str(pruned_dir), {"enabled": True, "vllm_pruned_model_dir": str(pruned_dir), "checkpoint_reused": True, "requested_sparsity": float(args.pruning_sparsity)}
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            torch_dtype=resolve_dtype(args.dtype),
+            trust_remote_code=args.trust_remote_code,
+            device_map=None,
+        ).to(args.device)
+        pruning_info = apply_score_pruning(
+            model,
+            score_dir=args.prune_score_dir,
+            sparsity=args.pruning_sparsity,
+            score_key=args.prune_score_key,
+            prune_ops=args.prune_ops,
+            granularity=args.prune_granularity,
+            lambda_value=args.prune_lambda,
+        )
+        pruned_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(pruned_dir, safe_serialization=True)
+        tokenizer.save_pretrained(pruned_dir)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return str(pruned_dir), {**pruning_info, "vllm_pruned_model_dir": str(pruned_dir), "checkpoint_reused": False}
+    finally:
+        if acquired:
+            try:
+                os.rmdir(lock_dir)
+            except OSError:
+                pass
 
 
 def finite_exp(value: float | None) -> float | None:
@@ -362,8 +451,17 @@ def score_records_vllm(tokenizer: Any, records: Sequence[dict[str, Any]], args: 
             f"but max_model_len is {max_model_len}. Increase --vllm_max_model_len."
         )
 
+    vllm_model_path, pruning_info = prepare_vllm_model_path(args, tokenizer)
+    for row in rows:
+        row["pruning_sparsity"] = float(args.pruning_sparsity)
+        row["prune_score_dir"] = args.prune_score_dir
+        row["prune_score_key"] = pruning_info.get("score_key")
+        row["prune_granularity"] = args.prune_granularity
+        row["pruning_info"] = pruning_info
+
     llm_kwargs = {
-        "model": str(args.model_path),
+        "model": str(vllm_model_path),
+        "tokenizer": str(vllm_model_path),
         "tensor_parallel_size": int(args.tensor_parallel_size),
         "gpu_memory_utilization": float(args.gpu_memory_utilization),
         "dtype": resolve_vllm_dtype(args.dtype),
@@ -452,6 +550,15 @@ def main() -> None:
             trust_remote_code=args.trust_remote_code,
             device_map=None,
         ).to(args.device)
+        pruning_info = apply_score_pruning(
+            model,
+            score_dir=args.prune_score_dir,
+            sparsity=args.pruning_sparsity,
+            score_key=args.prune_score_key,
+            prune_ops=args.prune_ops,
+            granularity=args.prune_granularity,
+            lambda_value=args.prune_lambda,
+        )
         model.eval()
 
         rows = []
@@ -467,6 +574,11 @@ def main() -> None:
                 max_sequence_length=args.max_sequence_length,
                 skip_overlength=args.skip_overlength,
             )
+            row["pruning_sparsity"] = float(args.pruning_sparsity)
+            row["prune_score_dir"] = args.prune_score_dir
+            row["prune_score_key"] = pruning_info.get("score_key")
+            row["prune_granularity"] = args.prune_granularity
+            row["pruning_info"] = pruning_info
             rows.append(row)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
