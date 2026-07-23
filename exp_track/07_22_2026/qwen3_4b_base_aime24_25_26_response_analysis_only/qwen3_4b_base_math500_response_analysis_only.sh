@@ -374,7 +374,11 @@ input_path = Path(sys.argv[1])
 shard_dir = Path(sys.argv[2])
 num_nodes = max(1, int(sys.argv[3]))
 max_records = int(sys.argv[4])
-lines = input_path.read_text(encoding="utf-8").splitlines()
+# Use physical JSONL rows only. str.splitlines() also splits on Unicode
+# separators such as U+2028/U+2029, which may appear inside generated_text
+# strings and would corrupt otherwise-valid JSON records.
+with input_path.open("r", encoding="utf-8") as handle:
+    lines = [line[:-1] if line.endswith("\n") else line for line in handle]
 if max_records >= 0:
     lines = lines[:max_records]
 num_shards = min(num_nodes, max(1, len(lines)))
