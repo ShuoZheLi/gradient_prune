@@ -1,0 +1,2889 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import multiprocessing as mp
+import os
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from itertools import combinations
+from pathlib import Path
+from queue import Empty
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+from typing import Any, Sequence
+
+import numpy as np
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+
+from best_of_n.checkpointing import (
+    ensure_merged_component_checkpoint,
+    load_actor_model,
+    load_critic_model,
+    load_tokenizer,
+    resolve_device,
+    resolve_dtype,
+    resolve_eos_token_ids,
+)
+from best_of_n.data import ExampleRecord, load_examples, score_response
+from best_of_n.decoding import ActorSamplingMode, ActorStepper, sample_token_from_actor, set_decode_seed
+
+
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except Exception as exc:  # pragma: no cover - handled at runtime
+    plt = None
+    MATPLOTLIB_IMPORT_ERROR = exc
+else:
+    MATPLOTLIB_IMPORT_ERROR = None
+
+try:
+    import ray
+except ImportError:
+    ray = None
+
+try:
+    from vllm import LLM, SamplingParams
+    from vllm.inputs.data import TokensPrompt
+except ImportError:
+    LLM = None
+    SamplingParams = None
+    TokensPrompt = None
+
+
+TOKENIZER_FINGERPRINT_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "vocab.json",
+    "merges.txt",
+    "spiece.model",
+)
+RAY_NODE_RESOURCE_FRACTION = 1e-3
+RAY_PROGRESS_POLL_INTERVAL_SEC = 0.2
+
+
+LABEL_TO_ID = {"false_high": 1, "true_high_matched": 0}
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON on line {line_number} of {path}: {exc}") from exc
+    return rows
+
+
+def _resolve_feature_path(row: dict[str, Any], feature_root: Path) -> Path:
+    h_final_path = row.get("h_final_path")
+    if not isinstance(h_final_path, str) or not h_final_path:
+        raise ValueError(f"Missing h_final_path for sample_id={row.get('sample_id')}")
+    relative = Path(h_final_path)
+    candidates: list[Path] = []
+    if relative.is_absolute():
+        candidates.append(relative)
+    else:
+        candidates.extend(
+            [
+                feature_root / relative,
+                feature_root / "features" / "h_final" / relative.name,
+                feature_root / "dataset" / relative,
+            ]
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find h_final for sample_id={row.get('sample_id')} h_final_path={h_final_path}; "
+        f"tried {[str(candidate) for candidate in candidates]}"
+    )
+
+
+def _load_h_final(path: Path, expected_sample_id: str | None = None) -> tuple[torch.Tensor, dict[str, Any]]:
+    try:
+        obj = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        obj = torch.load(path, map_location="cpu")
+    metadata: dict[str, Any] = {}
+    if isinstance(obj, dict):
+        if expected_sample_id is not None and obj.get("sample_id") not in {None, expected_sample_id}:
+            raise ValueError(f"Feature sample_id mismatch at {path}: {obj.get('sample_id')} != {expected_sample_id}")
+        tensor = obj.get("h_final")
+        metadata = {
+            "sample_id": obj.get("sample_id"),
+            "layer_index": obj.get("layer_index"),
+            "shape": obj.get("shape"),
+            "source": obj.get("source"),
+        }
+    else:
+        tensor = obj
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"Expected tensor or dict with h_final tensor at {path}, got {type(obj)}")
+    tensor = tensor.detach().cpu().float()
+    if tensor.ndim != 1:
+        tensor = tensor.reshape(-1)
+    if not torch.isfinite(tensor).all():
+        raise ValueError(f"Non-finite h_final values in {path}")
+    return tensor, metadata
+
+
+def _make_main_module_importable() -> None:
+    """Allow spawn workers to re-import this module when launched via `python -m`."""
+    if __name__ != "__main__":
+        return
+
+    module_spec = globals().get("__spec__")
+    canonical_name = getattr(module_spec, "name", None)
+    if not canonical_name:
+        return
+
+    module = sys.modules.get(__name__)
+    if module is None:
+        return
+
+    sys.modules[canonical_name] = module
+    for obj in vars(module).values():
+        if getattr(obj, "__module__", None) != __name__:
+            continue
+        try:
+            obj.__module__ = canonical_name
+        except Exception:
+            pass
+
+
+@dataclass(frozen=True)
+class ActorSpec:
+    actor_index: int
+    actor_name: str
+    checkpoint_dir: str
+    merged_root: str | None
+    hf_source_dir: str | None
+
+
+@dataclass(frozen=True)
+class WorkerAssignment:
+    worker_id: int
+    device_name: str | None
+    prompt_start: int
+    prompt_end: int
+    node_index: int | None = None
+    node_ip: str | None = None
+    node_resource_key: str | None = None
+    local_worker_index: int | None = None
+
+    @property
+    def num_prompts(self) -> int:
+        return max(self.prompt_end - self.prompt_start, 0)
+
+
+@dataclass(frozen=True)
+class RayNodeInfo:
+    node_index: int
+    node_ip: str
+    node_resource_key: str
+    node_name: str | None = None
+
+
+@dataclass
+class RunningMoments:
+    count: int = 0
+    total: float = 0.0
+    total_sq: float = 0.0
+
+    def add(self, value: float) -> None:
+        numeric = float(value)
+        self.count += 1
+        self.total += numeric
+        self.total_sq += numeric * numeric
+
+    def merge(self, other: "RunningMoments") -> None:
+        self.count += int(other.count)
+        self.total += float(other.total)
+        self.total_sq += float(other.total_sq)
+
+    def mean(self) -> float | None:
+        if self.count <= 0:
+            return None
+        return float(self.total / self.count)
+
+    def std(self) -> float | None:
+        if self.count <= 0:
+            return None
+        mean_value = self.total / self.count
+        variance = max((self.total_sq / self.count) - (mean_value * mean_value), 0.0)
+        return float(math.sqrt(variance))
+
+
+@dataclass(frozen=True)
+class SampledResponse:
+    sample_index: int
+    seed: int
+    prompt_length: int
+    response_text: str
+    response_token_ids: tuple[int, ...]
+    token_entropies: tuple[float, ...] | None
+    response_length: int
+    ended_with_eos: bool
+    hit_max_length: bool
+    task_score: float
+
+
+@dataclass(frozen=True)
+class ClassifierAidConfig:
+    classifier_dir: str
+    critic_model_dir: str
+    layer_index: int
+    threshold: float
+    diagnostic_dir: str
+    feature_root: str
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class CriticClassifierScores:
+    critic_value: float
+    false_high_probability: float
+    classifier_filtered: bool
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Actor proposal quality diagnostic. For each frozen actor checkpoint, sample a response bank per prompt, "
+            "score all responses with the task reward, and measure search headroom, diversity, and entropy."
+        )
+    )
+    parser.add_argument("--actor_checkpoint_dirs", nargs="+", type=str, required=True)
+    parser.add_argument("--actor_names", nargs="+", type=str, required=True)
+    parser.add_argument("--dataset_path", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--prompt_key", type=str, default="prompt")
+    parser.add_argument("--response_key", type=str, default=None)
+    parser.add_argument("--start_index", type=int, default=0)
+    parser.add_argument("--max_examples", type=int, required=True)
+    parser.add_argument("--shuffle_examples", action="store_true")
+    parser.add_argument("--num_samples_per_prompt", type=int, default=16)
+    parser.add_argument("--max_prompt_length", type=int, default=2048)
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--top_k", type=int, default=0)
+    parser.add_argument(
+        "--generation_backend",
+        type=str,
+        default="torch",
+        choices=["torch", "vllm"],
+        help="Generation backend. The default torch path preserves exact token entropy diagnostics.",
+    )
+    parser.add_argument(
+        "--vllm_logprobs_for_entropy",
+        action="store_true",
+        help=(
+            "Attempt to compute entropy diagnostics from vLLM full-vocabulary logprobs. "
+            "This is expensive and requires vLLM to return enough logprobs; otherwise entropy fields are null."
+        ),
+    )
+    parser.add_argument(
+        "--vllm_gpu_memory_utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization passed to vLLM when --generation_backend=vllm.",
+    )
+    parser.add_argument(
+        "--vllm_tensor_parallel_size",
+        type=int,
+        default=1,
+        help="Tensor parallel size passed to vLLM when --generation_backend=vllm.",
+    )
+    parser.add_argument(
+        "--vllm_max_model_len",
+        type=int,
+        default=None,
+        help="Optional max_model_len passed to vLLM. Defaults to the model config when omitted.",
+    )
+    parser.add_argument(
+        "--vllm_max_num_seqs",
+        type=int,
+        default=None,
+        help="Optional max_num_seqs passed to vLLM. Lower this if vLLM OOMs during warmup.",
+    )
+    parser.add_argument(
+        "--vllm_enforce_eager",
+        action="store_true",
+        help="Pass enforce_eager=True to vLLM. This can improve debuggability/reproducibility at a speed cost.",
+    )
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument("--worker_devices", nargs="+", default=None)
+    parser.add_argument(
+        "--ray_address",
+        type=str,
+        default=None,
+        help=(
+            "Optional Ray cluster address for cross-node execution. When set, --worker_devices is treated as the "
+            "node-local worker layout and is replicated across all alive Ray nodes. Use 'auto' to read $RAY_ADDRESS."
+        ),
+    )
+    parser.add_argument(
+        "--ray_num_cpus_per_worker",
+        type=float,
+        default=1.0,
+        help="CPU resources reserved per Ray worker task when --ray_address is used.",
+    )
+    parser.add_argument("--skip_merge", action="store_true")
+    parser.add_argument("--actor_merged_roots", nargs="+", default=None)
+    parser.add_argument("--actor_hf_source_dirs", nargs="+", default=None)
+    parser.add_argument("--bootstrap_samples", type=int, default=2000)
+    parser.add_argument("--skip_plots", action="store_true")
+    parser.add_argument("--plot_dpi", type=int, default=160)
+    parser.add_argument(
+        "--omit_prompt_text",
+        action="store_true",
+        help="Exclude the full prompt text from response_bank.jsonl rows to reduce disk usage.",
+    )
+    parser.add_argument(
+        "--omit_response_token_ids",
+        action="store_true",
+        help="Exclude generated response token ids from response_bank.jsonl rows to reduce disk usage.",
+    )
+    parser.add_argument(
+        "--store_token_entropies",
+        action="store_true",
+        help="Store the full token-level entropy trace for each response in response_bank.jsonl.",
+    )
+    parser.add_argument(
+        "--disable_actor_cache",
+        action="store_true",
+        help="Disable KV-cache decoding. This is slower but can help with unusual model implementations.",
+    )
+    parser.add_argument(
+        "--classifier_aid_dir",
+        type=str,
+        default=None,
+        help="Optional trained false-high classifier directory. Enables classifier-aided critic Best-of-N.",
+    )
+    parser.add_argument(
+        "--critic_model_dir",
+        type=str,
+        default=None,
+        help="Merged HF critic model directory used for critic scoring when --classifier_aid_dir is set.",
+    )
+    parser.add_argument(
+        "--classifier_aid_layer_index",
+        type=int,
+        default=18,
+        help="Critic hidden_states index used as the false-high classifier feature.",
+    )
+    parser.add_argument(
+        "--classifier_aid_threshold",
+        type=float,
+        default=0.5,
+        help="Filter candidates with P(false_high) >= this threshold.",
+    )
+    parser.add_argument(
+        "--classifier_aid_diagnostic_dir",
+        type=str,
+        default=None,
+        help="Diagnostic split directory used to recompute classifier standardization. Defaults to metrics.json args.",
+    )
+    parser.add_argument(
+        "--classifier_aid_feature_root",
+        type=str,
+        default=None,
+        help="Feature root used to recompute classifier standardization. Defaults to metrics.json args.",
+    )
+    return parser.parse_args()
+
+
+def _json_line(record: dict[str, Any]) -> str:
+    return json.dumps(record, ensure_ascii=True) + "\n"
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if dataclass_is_instance(value):
+        return {key: _json_safe(item) for key, item in asdict(value).items()}
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def dataclass_is_instance(value: Any) -> bool:
+    return hasattr(value, "__dataclass_fields__") and not isinstance(value, type)
+
+
+def _git_commit(repo_root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    return result.stdout.strip() or None
+
+
+def _resolve_optional_per_actor_list(
+    values: list[str] | None,
+    *,
+    num_actors: int,
+    argument_name: str,
+) -> list[str | None]:
+    if values is None:
+        return [None] * num_actors
+    if len(values) != num_actors:
+        raise ValueError(
+            f"{argument_name} must contain exactly one entry per actor "
+            f"({num_actors} expected, received {len(values)})."
+        )
+    return [value if value else None for value in values]
+
+
+def _assignment_ranges(*, num_items: int, num_workers: int) -> list[tuple[int, int]]:
+    if num_items <= 0:
+        return []
+    if num_workers <= 0:
+        raise ValueError("num_workers must be > 0 when items are present.")
+
+    active_workers = min(num_workers, num_items)
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    base = num_items // active_workers
+    remainder = num_items % active_workers
+    for worker_id in range(active_workers):
+        shard_size = base + (1 if worker_id < remainder else 0)
+        end = start + shard_size
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def _build_worker_assignments(
+    *,
+    num_prompts: int,
+    worker_devices: list[str | None],
+) -> list[WorkerAssignment]:
+    if not worker_devices:
+        worker_devices = [None]
+    ranges = _assignment_ranges(num_items=num_prompts, num_workers=len(worker_devices))
+    assignments: list[WorkerAssignment] = []
+    for worker_id, (start, end) in enumerate(ranges):
+        assignments.append(
+            WorkerAssignment(
+                worker_id=worker_id,
+                device_name=worker_devices[worker_id],
+                prompt_start=start,
+                prompt_end=end,
+            )
+        )
+    return assignments
+
+
+
+
+def _validate_vllm_worker_layout(*, worker_devices: Sequence[str | None], ray_address: str | None) -> None:
+    if ray_address is None and len(worker_devices) > 1:
+        raise ValueError(
+            "--generation_backend=vllm does not support multiple local worker devices in one process. "
+            "Use Ray/multinode execution or run one vLLM worker per script invocation."
+        )
+    for device_name in worker_devices:
+        if device_name is None:
+            raise ValueError("--generation_backend=vllm requires explicit CUDA worker devices, e.g. --worker_devices cuda:0")
+        if torch.device(device_name).type != "cuda":
+            raise ValueError(f"--generation_backend=vllm requires CUDA worker devices, got {device_name!r}.")
+
+def _build_distributed_worker_assignments(
+    *,
+    num_prompts: int,
+    worker_devices: list[str | None],
+    ray_nodes: list[RayNodeInfo],
+) -> list[WorkerAssignment]:
+    if not worker_devices:
+        worker_devices = [None]
+    if not ray_nodes:
+        raise ValueError("At least one Ray node is required.")
+    if num_prompts <= 0:
+        return []
+
+    worker_descriptors: list[tuple[RayNodeInfo, int, str | None]] = []
+    for local_worker_index, device_name in enumerate(worker_devices):
+        for node in ray_nodes:
+            worker_descriptors.append((node, local_worker_index, device_name))
+
+    ranges = _assignment_ranges(num_items=num_prompts, num_workers=len(worker_descriptors))
+    assignments: list[WorkerAssignment] = []
+    for worker_id, (start, end) in enumerate(ranges):
+        node, local_worker_index, device_name = worker_descriptors[worker_id]
+        assignments.append(
+            WorkerAssignment(
+                worker_id=worker_id,
+                device_name=device_name,
+                prompt_start=start,
+                prompt_end=end,
+                node_index=node.node_index,
+                node_ip=node.node_ip,
+                node_resource_key=node.node_resource_key,
+                local_worker_index=local_worker_index,
+            )
+        )
+    return assignments
+
+
+def _validate_visible_cuda_device(device: torch.device | None, *, label: str) -> None:
+    if device is None or device.type != "cuda":
+        return
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"{label} requested CUDA device {device}, but CUDA is not available in this worker.")
+    if device.index is None:
+        return
+    visible_device_count = torch.cuda.device_count()
+    if device.index >= visible_device_count:
+        raise RuntimeError(
+            f"{label} requested CUDA device {device}, but this worker only sees {visible_device_count} CUDA device(s)."
+        )
+
+
+def _resolve_ray_address(ray_address: str | None) -> str | None:
+    if ray_address is None:
+        return None
+    normalized = str(ray_address).strip()
+    if not normalized:
+        return None
+    if normalized.lower() == "auto":
+        env_address = os.environ.get("RAY_ADDRESS")
+        if not env_address:
+            raise ValueError("--ray_address=auto was requested, but $RAY_ADDRESS is not set.")
+        return env_address
+    return normalized
+
+
+def _require_ray():
+    if ray is None:
+        raise ImportError("Ray is required for cross-node actor proposal evaluation, but it is not installed.")
+    return ray
+
+
+def _resolve_ray_node_resource_key(node_payload: dict[str, Any]) -> str:
+    resources = node_payload.get("Resources") or {}
+    node_ip = str(node_payload.get("NodeManagerAddress") or "").strip()
+    direct_key = f"node:{node_ip}" if node_ip else None
+    if direct_key is not None and direct_key in resources:
+        return direct_key
+
+    candidates = sorted(str(key) for key in resources if str(key).startswith("node:"))
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if direct_key is not None:
+        matches = [candidate for candidate in candidates if candidate == direct_key or candidate.endswith(node_ip)]
+        if len(matches) == 1:
+            return matches[0]
+
+    node_id = str(node_payload.get("NodeID") or "").strip()
+    if node_id:
+        matches = [candidate for candidate in candidates if node_id in candidate]
+        if len(matches) == 1:
+            return matches[0]
+
+    raise ValueError(
+        "Unable to resolve a unique Ray node resource key for node payload with "
+        f"NodeManagerAddress={node_ip!r} and resources={sorted(str(key) for key in resources)}"
+    )
+
+
+def _discover_ray_nodes(ray_module) -> list[RayNodeInfo]:
+    nodes: list[RayNodeInfo] = []
+    for raw_node in ray_module.nodes():
+        if not bool(raw_node.get("Alive")):
+            continue
+        node_ip = str(raw_node.get("NodeManagerAddress") or "").strip()
+        if not node_ip:
+            raise ValueError(f"Ray reported an alive node without NodeManagerAddress: {raw_node}")
+        nodes.append(
+            RayNodeInfo(
+                node_index=-1,
+                node_ip=node_ip,
+                node_resource_key=_resolve_ray_node_resource_key(raw_node),
+                node_name=(
+                    str(raw_node.get("NodeName"))
+                    if raw_node.get("NodeName") is not None
+                    else (
+                        str(raw_node.get("NodeManagerHostname"))
+                        if raw_node.get("NodeManagerHostname") is not None
+                        else None
+                    )
+                ),
+            )
+        )
+    nodes.sort(key=lambda item: (item.node_ip, item.node_name or ""))
+    return [
+        RayNodeInfo(
+            node_index=index,
+            node_ip=node.node_ip,
+            node_resource_key=node.node_resource_key,
+            node_name=node.node_name,
+        )
+        for index, node in enumerate(nodes)
+    ]
+
+
+def _normalize_cuda_device_name(device_name: str | None, *, assume_default_cuda: bool) -> str | None:
+    if device_name is None:
+        return "cuda:0" if assume_default_cuda else None
+    resolved = torch.device(device_name)
+    if resolved.type != "cuda":
+        return str(resolved)
+    resolved_index = 0 if resolved.index is None else int(resolved.index)
+    return f"cuda:{resolved_index}"
+
+
+def _remap_cuda_device_name(device_name: str | None, *, cuda_slot_mapping: dict[int, int]) -> str | None:
+    if device_name is None:
+        return None
+    resolved = torch.device(device_name)
+    if resolved.type != "cuda":
+        return str(resolved)
+    resolved_index = 0 if resolved.index is None else int(resolved.index)
+    if resolved_index not in cuda_slot_mapping:
+        raise ValueError(
+            f"CUDA device index {resolved_index} is missing from the Ray-visible slot mapping {cuda_slot_mapping}."
+        )
+    return f"cuda:{cuda_slot_mapping[resolved_index]}"
+
+
+def _build_ray_node_execution_specs(
+    *,
+    worker_assignments: Sequence[WorkerAssignment],
+    ray_num_cpus_per_worker: float,
+) -> list[dict[str, Any]]:
+    node_groups: dict[tuple[int | None, str | None, str | None], list[WorkerAssignment]] = {}
+    for assignment in worker_assignments:
+        group_key = (assignment.node_index, assignment.node_ip, assignment.node_resource_key)
+        node_groups.setdefault(group_key, []).append(assignment)
+
+    node_specs: list[dict[str, Any]] = []
+    for group_key in sorted(node_groups, key=lambda item: (-1 if item[0] is None else int(item[0]), str(item[1]))):
+        node_assignments = sorted(node_groups[group_key], key=lambda item: int(item.worker_id))
+        normalized_assignments: list[tuple[WorkerAssignment, str | None]] = []
+        referenced_cuda_slots: set[int] = set()
+
+        for assignment in node_assignments:
+            device_name = _normalize_cuda_device_name(assignment.device_name, assume_default_cuda=True)
+            normalized_assignments.append((assignment, device_name))
+            if device_name is None:
+                continue
+            resolved = torch.device(device_name)
+            if resolved.type == "cuda":
+                referenced_cuda_slots.add(0 if resolved.index is None else int(resolved.index))
+
+        cuda_slot_mapping = {
+            original_slot: remapped_slot
+            for remapped_slot, original_slot in enumerate(sorted(referenced_cuda_slots))
+        }
+        remapped_assignments: list[WorkerAssignment] = []
+        for assignment, device_name in normalized_assignments:
+            remapped_assignments.append(
+                WorkerAssignment(
+                    worker_id=assignment.worker_id,
+                    device_name=_remap_cuda_device_name(device_name, cuda_slot_mapping=cuda_slot_mapping),
+                    prompt_start=assignment.prompt_start,
+                    prompt_end=assignment.prompt_end,
+                    node_index=assignment.node_index,
+                    node_ip=assignment.node_ip,
+                    node_resource_key=assignment.node_resource_key,
+                    local_worker_index=assignment.local_worker_index,
+                )
+            )
+
+        node_specs.append(
+            {
+                "node_index": group_key[0],
+                "node_ip": group_key[1],
+                "node_resource_key": group_key[2],
+                "assignments": remapped_assignments,
+                "num_gpus": float(len(referenced_cuda_slots)),
+                "num_cpus": float(ray_num_cpus_per_worker) * float(len(remapped_assignments)),
+                "cuda_slot_mapping": cuda_slot_mapping,
+            }
+        )
+    return node_specs
+
+
+def _progress_postfix(worker_progress: dict[int, dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for worker_id in sorted(worker_progress):
+        state = worker_progress[worker_id]
+        done = int(state.get("done", 0))
+        total = int(state.get("total", 0))
+        parts.append(f"w{worker_id}:{done}/{total}")
+    return " | ".join(parts)
+
+
+def _tokenizer_fingerprint(model_dir: Path) -> dict[str, Any]:
+    # `hashlib` is intentionally imported lazily to keep the module import list focused above.
+    import hashlib
+
+    digest = hashlib.sha256()
+    included_files: list[str] = []
+    for filename in TOKENIZER_FINGERPRINT_FILES:
+        path = model_dir / filename
+        digest.update(filename.encode("utf-8"))
+        if not path.exists():
+            digest.update(b"<missing>")
+            continue
+        included_files.append(filename)
+        digest.update(path.read_bytes())
+    return {"sha256": digest.hexdigest(), "files": included_files}
+
+
+def _assert_shared_tokenizer(tokenizer_fingerprints: dict[str, dict[str, Any]]) -> None:
+    fingerprints = {name: payload["sha256"] for name, payload in tokenizer_fingerprints.items()}
+    unique_fingerprints = set(fingerprints.values())
+    if len(unique_fingerprints) == 1:
+        return
+    details = ", ".join(f"{name}={fingerprint}" for name, fingerprint in fingerprints.items())
+    raise ValueError(
+        "Actor proposal diagnostic requires all compared actors to share the same tokenizer so prompt "
+        f"truncation, entropy, and token-length measurements remain comparable. Fingerprints: {details}"
+    )
+
+
+def _sample_seed(base_seed: int, *, actor_index: int, prompt_index: int, sample_index: int) -> int:
+    return int(base_seed + actor_index * 1_000_000 + prompt_index * 10_000 + sample_index)
+
+
+def _entropy_quarter_means(token_entropies: Sequence[float]) -> tuple[float | None, float | None, float | None, float | None]:
+    if not token_entropies:
+        return None, None, None, None
+
+    entropy_array = np.asarray(token_entropies, dtype=np.float64)
+    quarters = np.array_split(entropy_array, 4)
+    means: list[float | None] = []
+    for quarter in quarters:
+        means.append(None if quarter.size == 0 else float(quarter.mean()))
+    return means[0], means[1], means[2], means[3]
+
+
+def _entropy_summary(token_entropies: Sequence[float] | None) -> dict[str, Any]:
+    if token_entropies is None:
+        return {
+            "mean_response_entropy": None,
+            "sum_response_entropy": None,
+            "std_response_entropy": None,
+            "max_response_entropy": None,
+            "min_response_entropy": None,
+            "first_quarter_mean_entropy": None,
+            "second_quarter_mean_entropy": None,
+            "third_quarter_mean_entropy": None,
+            "fourth_quarter_mean_entropy": None,
+        }
+
+    if not token_entropies:
+        return {
+            "mean_response_entropy": 0.0,
+            "sum_response_entropy": 0.0,
+            "std_response_entropy": 0.0,
+            "max_response_entropy": 0.0,
+            "min_response_entropy": 0.0,
+            "first_quarter_mean_entropy": None,
+            "second_quarter_mean_entropy": None,
+            "third_quarter_mean_entropy": None,
+            "fourth_quarter_mean_entropy": None,
+        }
+
+    entropy_array = np.asarray(token_entropies, dtype=np.float64)
+    first_q, second_q, third_q, fourth_q = _entropy_quarter_means(token_entropies)
+    return {
+        "mean_response_entropy": float(entropy_array.mean()),
+        "sum_response_entropy": float(entropy_array.sum()),
+        "std_response_entropy": float(entropy_array.std()),
+        "max_response_entropy": float(entropy_array.max()),
+        "min_response_entropy": float(entropy_array.min()),
+        "first_quarter_mean_entropy": first_q,
+        "second_quarter_mean_entropy": second_q,
+        "third_quarter_mean_entropy": third_q,
+        "fourth_quarter_mean_entropy": fourth_q,
+    }
+
+
+def _prompt_ids_tensor(
+    *,
+    example: ExampleRecord,
+    tokenizer,
+    max_prompt_length: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if example.prompt_token_ids is not None:
+        prompt_ids = list(example.prompt_token_ids)
+    else:
+        tokenized = tokenizer(
+            example.prompt_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_prompt_length,
+        )
+        prompt_ids = tokenized["input_ids"][0].tolist()
+    return torch.tensor([prompt_ids], device=device, dtype=torch.long)
+
+
+def sample_actor_response_with_entropy(
+    *,
+    actor,
+    tokenizer,
+    example: ExampleRecord,
+    prompt_ids: torch.Tensor,
+    sample_index: int,
+    seed: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    eos_token_ids: tuple[int, ...],
+    use_actor_cache: bool,
+) -> SampledResponse:
+    set_decode_seed(seed)
+    actor_state = ActorStepper(actor, prompt_ids, use_cache=use_actor_cache)
+    generated_token_ids: list[int] = []
+    token_entropies: list[float] = []
+    ended_with_eos = False
+
+    for _step_index in range(max_new_tokens):
+        logits = actor_state.current_logits.float()
+        log_probs = torch.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
+        entropy = float((-(probs * log_probs).sum(dim=-1)).item())
+        token_entropies.append(entropy)
+
+        selected_token_id = sample_token_from_actor(
+            logits.squeeze(0),
+            sampling_mode=ActorSamplingMode.SAMPLE.value,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+        )
+        generated_token_ids.append(selected_token_id)
+        actor_state.append(selected_token_id)
+        if selected_token_id in eos_token_ids:
+            ended_with_eos = True
+            break
+
+    response_length = len(generated_token_ids)
+    hit_max_length = bool(max_new_tokens > 0 and not ended_with_eos and response_length >= max_new_tokens)
+    response_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+    task_score = float(score_response(example, response_text))
+    return SampledResponse(
+        sample_index=sample_index,
+        seed=seed,
+        prompt_length=int(prompt_ids.shape[1]),
+        response_text=response_text,
+        response_token_ids=tuple(int(token_id) for token_id in generated_token_ids),
+        token_entropies=tuple(float(value) for value in token_entropies),
+        response_length=response_length,
+        ended_with_eos=ended_with_eos,
+        hit_max_length=hit_max_length,
+        task_score=task_score,
+    )
+
+
+def _full_vocab_entropy_from_logprobs(logprob_payload: Any) -> float | None:
+    if not isinstance(logprob_payload, dict):
+        return None
+
+    logprob_values: list[float] = []
+    for value in logprob_payload.values():
+        if isinstance(value, (int, float)):
+            logprob_values.append(float(value))
+            continue
+        candidate = getattr(value, "logprob", None)
+        if candidate is not None:
+            logprob_values.append(float(candidate))
+            continue
+        if isinstance(value, dict) and "logprob" in value:
+            logprob_values.append(float(value["logprob"]))
+
+    if not logprob_values:
+        return None
+    log_probs = np.asarray(logprob_values, dtype=np.float64)
+    probs = np.exp(log_probs)
+    mass = float(probs.sum())
+    if not np.isfinite(mass) or mass <= 0.0:
+        return None
+    if abs(mass - 1.0) > 1e-3:
+        return None
+    return float(-(probs * log_probs).sum())
+
+
+def _vllm_output_token_ids(output: Any) -> tuple[int, ...]:
+    token_ids = getattr(output, "token_ids", None)
+    if token_ids is None:
+        token_ids = getattr(output, "output_token_ids", None)
+    if token_ids is None:
+        return ()
+    return tuple(int(token_id) for token_id in token_ids)
+
+
+def _vllm_output_text(output: Any, tokenizer) -> str:
+    text = getattr(output, "text", None)
+    if text is not None:
+        return str(text)
+    return tokenizer.decode(_vllm_output_token_ids(output), skip_special_tokens=True)
+
+
+def _resolve_vllm_dtype_name(dtype_name: str) -> str:
+    normalized = dtype_name.lower()
+    if normalized == "bf16":
+        return "bfloat16"
+    if normalized == "fp16":
+        return "float16"
+    if normalized == "fp32":
+        return "float32"
+    return dtype_name
+
+
+def _vllm_finish_reason(output: Any) -> str | None:
+    finish_reason = getattr(output, "finish_reason", None)
+    return None if finish_reason is None else str(finish_reason)
+
+
+def _vllm_output_entropies(output: Any, *, enabled: bool) -> tuple[float, ...] | None:
+    if not enabled:
+        return None
+    logprobs = getattr(output, "logprobs", None)
+    if not logprobs:
+        return None
+
+    entropies: list[float] = []
+    for step_logprobs in logprobs:
+        entropy = _full_vocab_entropy_from_logprobs(step_logprobs)
+        if entropy is None:
+            return None
+        entropies.append(entropy)
+    return tuple(entropies)
+
+
+def sample_actor_responses_with_vllm(
+    *,
+    llm,
+    tokenizer,
+    example: ExampleRecord,
+    prompt_ids: torch.Tensor,
+    actor_spec: ActorSpec,
+    prompt_index: int,
+    base_seed: int,
+    num_samples_per_prompt: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    eos_token_ids: tuple[int, ...],
+    logprobs_for_entropy: bool,
+) -> list[SampledResponse]:
+    if SamplingParams is None:
+        raise ImportError("vLLM is required when --generation_backend=vllm, but it is not installed.")
+
+    outputs_by_sample: list[Any] = []
+    prompt_token_ids = [int(token_id) for token_id in prompt_ids[0].tolist()]
+    vllm_top_k = 0 if int(top_k) <= 0 else int(top_k)
+    logprobs = None
+    if logprobs_for_entropy:
+        vocab_size = getattr(getattr(llm, "llm_engine", None), "vocab_size", None)
+        if vocab_size is None:
+            vocab_size = getattr(tokenizer, "vocab_size", None)
+        if vocab_size is None:
+            vocab_size = len(tokenizer)
+        logprobs = int(vocab_size)
+
+    for sample_index in range(num_samples_per_prompt):
+        seed = _sample_seed(
+            base_seed,
+            actor_index=actor_spec.actor_index,
+            prompt_index=prompt_index,
+            sample_index=sample_index,
+        )
+        sampling_params = SamplingParams(
+            n=1,
+            temperature=float(temperature),
+            top_p=float(top_p),
+            top_k=vllm_top_k,
+            max_tokens=int(max_new_tokens),
+            seed=int(seed),
+            stop_token_ids=list(eos_token_ids),
+            logprobs=logprobs,
+            skip_special_tokens=True,
+        )
+        prompt_payload = (
+            TokensPrompt(prompt_token_ids=prompt_token_ids)
+            if TokensPrompt is not None
+            else {"prompt_token_ids": prompt_token_ids}
+        )
+        request_outputs = llm.generate(
+            prompts=[prompt_payload],
+            sampling_params=sampling_params,
+            use_tqdm=False,
+        )
+        outputs_by_sample.append(request_outputs[0].outputs[0])
+
+    sampled_responses: list[SampledResponse] = []
+    for sample_index, output in enumerate(outputs_by_sample):
+        seed = _sample_seed(
+            base_seed,
+            actor_index=actor_spec.actor_index,
+            prompt_index=prompt_index,
+            sample_index=sample_index,
+        )
+        response_token_ids = _vllm_output_token_ids(output)
+        response_text = _vllm_output_text(output, tokenizer)
+        finish_reason = _vllm_finish_reason(output)
+        ended_with_eos = bool(response_token_ids and response_token_ids[-1] in eos_token_ids) or finish_reason == "stop"
+        hit_max_length = finish_reason == "length" or (
+            max_new_tokens > 0 and not ended_with_eos and len(response_token_ids) >= max_new_tokens
+        )
+        sampled_responses.append(
+            SampledResponse(
+                sample_index=sample_index,
+                seed=seed,
+                prompt_length=int(prompt_ids.shape[1]),
+                response_text=response_text,
+                response_token_ids=response_token_ids,
+                token_entropies=_vllm_output_entropies(output, enabled=logprobs_for_entropy),
+                response_length=len(response_token_ids),
+                ended_with_eos=ended_with_eos,
+                hit_max_length=bool(hit_max_length),
+                task_score=float(score_response(example, response_text)),
+            )
+        )
+    return sampled_responses
+
+
+def _build_response_row(
+    *,
+    actor_name: str,
+    actor_checkpoint_dir: str,
+    prompt_index: int,
+    example: ExampleRecord,
+    sampled_response: SampledResponse,
+    omit_prompt_text: bool,
+    omit_response_token_ids: bool,
+    store_token_entropies: bool,
+) -> dict[str, Any]:
+    row = {
+        "actor_name": actor_name,
+        "actor_checkpoint_dir": actor_checkpoint_dir,
+        "prompt_index": int(prompt_index),
+        "example_id": int(example.example_id),
+        "sample_index": int(sampled_response.sample_index),
+        "seed": int(sampled_response.seed),
+        "response": sampled_response.response_text,
+        "response_length": int(sampled_response.response_length),
+        "ended_with_eos": bool(sampled_response.ended_with_eos),
+        "hit_max_length": bool(sampled_response.hit_max_length),
+        "task_score": float(sampled_response.task_score),
+        "accuracy": float(sampled_response.task_score),
+        "prompt_length": int(sampled_response.prompt_length),
+    }
+    row.update(_entropy_summary(sampled_response.token_entropies))
+    if not omit_prompt_text:
+        row["prompt"] = example.prompt_text
+    if not omit_response_token_ids:
+        row["response_token_ids"] = [int(token_id) for token_id in sampled_response.response_token_ids]
+    if store_token_entropies:
+        row["token_entropies"] = (
+            None
+            if sampled_response.token_entropies is None
+            else [float(value) for value in sampled_response.token_entropies]
+        )
+    return row
+
+
+def _oracle_metric_key(num_samples_per_prompt: int) -> str:
+    return f"oracle_best_of_{int(num_samples_per_prompt)}_accuracy"
+
+
+def _score_sum_value(scores: np.ndarray) -> int | float:
+    total = float(scores.sum())
+    rounded = round(total)
+    if np.allclose(scores, np.round(scores)) and abs(total - rounded) < 1e-9:
+        return int(rounded)
+    return total
+
+
+def _move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
+
+
+def _build_full_text(prompt_text: str, response_text: str) -> str:
+    return prompt_text.rstrip() + "\n\n" + response_text.lstrip()
+
+
+def _value_logits_to_scalar_values(critic, values: torch.Tensor) -> torch.Tensor:
+    if values.dim() == 2:
+        return values.float()
+    if values.dim() != 3:
+        raise ValueError(f"Unexpected critic value tensor shape: {tuple(values.shape)}")
+    if values.shape[-1] == 1:
+        return values.squeeze(-1).float()
+
+    from verl.trainer.ppo.value_categorical import (
+        extract_value_head_spec,
+        unscale_scalar_values,
+        value_logits_to_probs,
+        value_probs_to_scaled_scalar,
+    )
+
+    spec = extract_value_head_spec(getattr(critic, "config", {}))
+    probs = value_logits_to_probs(values.float())
+    support = spec.support(device=probs.device, dtype=probs.dtype)
+    scaled_values = value_probs_to_scaled_scalar(probs, support)
+    return unscale_scalar_values(scaled_values, spec).float()
+
+
+def _extract_scalar_values_from_critic_outputs(critic, outputs) -> torch.Tensor:
+    if hasattr(critic, "v_head"):
+        values = outputs[2]
+    elif hasattr(outputs, "logits"):
+        values = outputs.logits
+    elif isinstance(outputs, tuple):
+        values = outputs[0]
+    else:
+        raise TypeError(f"Unsupported critic output type: {type(outputs).__name__}")
+    return _value_logits_to_scalar_values(critic, values)
+
+
+def _extract_final_value(critic_outputs, *, critic, attention_mask: torch.Tensor) -> float:
+    values_attr = getattr(critic_outputs, "values", None)
+    if torch.is_tensor(values_attr):
+        values = values_attr
+        if values.dim() == 3 and values.shape[-1] == 1:
+            values = values.squeeze(-1)
+        elif values.dim() != 2:
+            raise ValueError(f"Unexpected outputs.values shape: {tuple(values.shape)}")
+        scalar_values = values.float()
+    else:
+        scalar_values = _extract_scalar_values_from_critic_outputs(critic, critic_outputs)
+
+    final_index = int(attention_mask.long().sum(dim=-1)[0].item()) - 1
+    if final_index < 0:
+        raise ValueError("Cannot extract final value from an empty sequence.")
+    value = float(scalar_values[0, final_index].detach().cpu().item())
+    if not math.isfinite(value):
+        raise ValueError(f"Non-finite critic value: {value}")
+    return value
+
+
+def _final_token_hidden_state(outputs, attention_mask: torch.Tensor, layer_index: int) -> torch.Tensor:
+    hidden_states = getattr(outputs, "hidden_states", None)
+    if hidden_states is None:
+        raise ValueError("Critic outputs do not include hidden_states; cannot run classifier aid.")
+    if not -len(hidden_states) <= layer_index < len(hidden_states):
+        raise ValueError(
+            f"classifier aid layer_index={layer_index} is out of range for {len(hidden_states)} hidden-state tensors."
+        )
+    final_index = int(attention_mask.long().sum(dim=-1)[0].item()) - 1
+    if final_index < 0:
+        raise ValueError("Cannot extract classifier feature from an empty critic sequence.")
+    return hidden_states[layer_index][0, final_index, :].detach().cpu().float().reshape(-1)
+
+
+def _standardization_from_classifier_training_split(
+    *,
+    diagnostic_dir: Path,
+    feature_root: Path,
+    enabled: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    train_path = diagnostic_dir / "train.jsonl"
+    if not train_path.exists():
+        raise FileNotFoundError(f"Missing classifier-aid training split for standardization: {train_path}")
+    rows = _read_jsonl(train_path)
+    features: list[torch.Tensor] = []
+    for row in rows:
+        sample_id = str(row.get("sample_id"))
+        feature_path = _resolve_feature_path(row, feature_root)
+        feature, _metadata = _load_h_final(feature_path, expected_sample_id=sample_id)
+        features.append(feature)
+    if not features:
+        raise RuntimeError(f"No classifier-aid standardization rows loaded from {train_path}")
+    dims = {int(feature.numel()) for feature in features}
+    if len(dims) != 1:
+        raise ValueError(f"Inconsistent classifier-aid feature dimensions: {sorted(dims)}")
+    train_x = torch.stack(features).float()
+    if not enabled:
+        return torch.zeros_like(train_x[:1]), torch.ones_like(train_x[:1])
+    return train_x.mean(dim=0, keepdim=True), train_x.std(dim=0, keepdim=True).clamp_min(1e-6)
+
+
+def _make_classifier_model(model_type: str, input_dim: int, hidden_dim: int) -> nn.Module:
+    if model_type == "logreg":
+        return nn.Linear(input_dim, 2)
+    if model_type == "mlp":
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 2),
+        )
+    raise ValueError(f"Unsupported classifier aid model_type={model_type!r}")
+
+
+def _resolve_classifier_aid_config(args: argparse.Namespace) -> ClassifierAidConfig | None:
+    if args.classifier_aid_dir is None:
+        return None
+    classifier_dir = Path(args.classifier_aid_dir).expanduser().resolve()
+    metrics_path = classifier_dir / "metrics.json"
+    if not metrics_path.exists():
+        raise FileNotFoundError(f"Missing classifier aid metrics.json: {metrics_path}")
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics_args = metrics.get("args", {})
+    diagnostic_dir = Path(args.classifier_aid_diagnostic_dir or metrics_args.get("diagnostic_dir", ""))
+    feature_root = Path(args.classifier_aid_feature_root or metrics_args.get("feature_root", ""))
+    if args.critic_model_dir is None:
+        raise ValueError("--critic_model_dir is required when --classifier_aid_dir is set.")
+    if not diagnostic_dir.exists():
+        raise FileNotFoundError(f"Missing classifier aid diagnostic dir: {diagnostic_dir}")
+    if not feature_root.exists():
+        raise FileNotFoundError(f"Missing classifier aid feature root: {feature_root}")
+    if not 0.0 <= float(args.classifier_aid_threshold) <= 1.0:
+        raise ValueError(f"--classifier_aid_threshold must be in [0, 1], got {args.classifier_aid_threshold}")
+    return ClassifierAidConfig(
+        classifier_dir=str(classifier_dir),
+        critic_model_dir=str(Path(args.critic_model_dir).expanduser().resolve()),
+        layer_index=int(args.classifier_aid_layer_index),
+        threshold=float(args.classifier_aid_threshold),
+        diagnostic_dir=str(diagnostic_dir.expanduser().resolve()),
+        feature_root=str(feature_root.expanduser().resolve()),
+    )
+
+
+class CriticClassifierScorer:
+    def __init__(
+        self,
+        *,
+        config: ClassifierAidConfig,
+        device: torch.device,
+        dtype: torch.dtype,
+        trust_remote_code: bool,
+    ) -> None:
+        self.config = config
+        self.device = device
+        self.critic_tokenizer = load_tokenizer(Path(config.critic_model_dir), trust_remote_code=trust_remote_code)
+        self.critic = load_critic_model(
+            Path(config.critic_model_dir),
+            dtype=dtype,
+            device=device,
+            trust_remote_code=trust_remote_code,
+        )
+        self.critic.eval()
+
+        classifier_dir = Path(config.classifier_dir)
+        metrics = json.loads((classifier_dir / "metrics.json").read_text(encoding="utf-8"))
+        model_type = str(metrics.get("model_type") or metrics.get("args", {}).get("model_type"))
+        input_dim = int(metrics["input_dim"])
+        hidden_dim = int(metrics.get("args", {}).get("hidden_dim", 256))
+        state_path = classifier_dir / f"{model_type}_state_dict.pt"
+        if not state_path.exists():
+            raise FileNotFoundError(f"Missing classifier aid state dict: {state_path}")
+        self.classifier = _make_classifier_model(model_type, input_dim, hidden_dim)
+        self.classifier.load_state_dict(torch.load(state_path, map_location="cpu", weights_only=True))
+        self.classifier.eval()
+        standardization_enabled = bool(metrics.get("standardization", {}).get("enabled", True))
+        self.standardization_mean, self.standardization_std = _standardization_from_classifier_training_split(
+            diagnostic_dir=Path(config.diagnostic_dir),
+            feature_root=Path(config.feature_root),
+            enabled=standardization_enabled,
+        )
+        if int(self.standardization_mean.shape[1]) != input_dim:
+            raise ValueError(
+                f"Classifier standardization dimension {self.standardization_mean.shape[1]} does not match input_dim={input_dim}."
+            )
+
+    def score(self, *, prompt_text: str, response_text: str) -> CriticClassifierScores:
+        full_text = _build_full_text(prompt_text, response_text)
+        inputs = self.critic_tokenizer(full_text, return_tensors="pt", return_token_type_ids=False)
+        inputs = _move_batch_to_device(inputs, self.device)
+        with torch.inference_mode():
+            try:
+                outputs = self.critic(**inputs, output_hidden_states=True, return_dict=True, use_cache=False)
+            except TypeError:
+                outputs = self.critic(**inputs, output_hidden_states=True, return_dict=True)
+            critic_value = _extract_final_value(outputs, critic=self.critic, attention_mask=inputs["attention_mask"])
+            feature = _final_token_hidden_state(outputs, inputs["attention_mask"], self.config.layer_index).reshape(1, -1)
+            standardized = (feature - self.standardization_mean) / self.standardization_std
+            logits = self.classifier(standardized)
+            false_high_probability = float(
+                torch.softmax(logits, dim=1)[0, LABEL_TO_ID["false_high"]].detach().cpu().item()
+            )
+        return CriticClassifierScores(
+            critic_value=float(critic_value),
+            false_high_probability=false_high_probability,
+            classifier_filtered=bool(false_high_probability >= self.config.threshold),
+        )
+
+
+def _add_classifier_aided_summary(prompt_summary: dict[str, Any], sorted_rows: Sequence[dict[str, Any]]) -> None:
+    if not sorted_rows or "critic_value" not in sorted_rows[0]:
+        return
+    critic_values = np.asarray([float(row["critic_value"]) for row in sorted_rows], dtype=np.float64)
+    best_index = int(np.argmax(critic_values))
+    best_row = sorted_rows[best_index]
+    kept_rows = [row for row in sorted_rows if not bool(row.get("classifier_filtered_as_false_high", False))]
+    fallback_used = len(kept_rows) == 0
+    aided_candidates = sorted_rows if fallback_used else kept_rows
+    aided_values = np.asarray([float(row["critic_value"]) for row in aided_candidates], dtype=np.float64)
+    aided_row = aided_candidates[int(np.argmax(aided_values))]
+    filtered_count = sum(int(bool(row.get("classifier_filtered_as_false_high", False))) for row in sorted_rows)
+    prompt_summary.update(
+        {
+            "critic_best_of_n_accuracy": float(best_row["task_score"]),
+            "critic_best_sample_index": int(best_row["sample_index"]),
+            "critic_best_value": float(best_row["critic_value"]),
+            "classifier_aided_best_of_n_accuracy": float(aided_row["task_score"]),
+            "classifier_aided_best_sample_index": int(aided_row["sample_index"]),
+            "classifier_aided_best_value": float(aided_row["critic_value"]),
+            "classifier_aided_best_false_high_probability": float(aided_row["classifier_false_high_probability"]),
+            "classifier_aid_filtered_count": int(filtered_count),
+            "classifier_aid_kept_count": int(len(sorted_rows) - filtered_count),
+            "classifier_aid_fallback_used": bool(fallback_used),
+        }
+    )
+
+
+def build_prompt_summary(
+    *,
+    actor_name: str,
+    actor_checkpoint_dir: str,
+    prompt_index: int,
+    example: ExampleRecord,
+    response_rows: Sequence[dict[str, Any]],
+    num_samples_per_prompt: int,
+) -> dict[str, Any]:
+    if not response_rows:
+        raise ValueError("Each prompt must contain at least one sampled response.")
+
+    sorted_rows = sorted(response_rows, key=lambda row: int(row["sample_index"]))
+    scores = np.asarray([float(row["task_score"]) for row in sorted_rows], dtype=np.float64)
+    lengths = np.asarray([float(row["response_length"]) for row in sorted_rows], dtype=np.float64)
+    entropy_values = [row["mean_response_entropy"] for row in sorted_rows if row["mean_response_entropy"] is not None]
+    entropies = np.asarray([float(value) for value in entropy_values], dtype=np.float64)
+    normalized_responses = [str(row["response"]).strip() for row in sorted_rows]
+    num_distinct_responses = len(set(normalized_responses))
+    distinct_response_fraction = num_distinct_responses / max(num_samples_per_prompt, 1)
+    oracle_key = _oracle_metric_key(num_samples_per_prompt)
+
+    prompt_summary = {
+        "actor_name": actor_name,
+        "actor_checkpoint_dir": actor_checkpoint_dir,
+        "prompt_index": int(prompt_index),
+        "example_id": int(example.example_id),
+        "num_samples": int(num_samples_per_prompt),
+        "sampled_single_accuracy": float(scores[0]),
+        "mean_sample_accuracy": float(scores.mean()),
+        "oracle_best_of_n_accuracy": float(scores.max()),
+        "has_success": int(float(scores.max()) > 0.0),
+        "num_successes_in_bank": _score_sum_value(scores),
+        "success_rate_in_bank": float(scores.mean()),
+        "outcome_variance": float(scores.var()),
+        "num_distinct_responses": int(num_distinct_responses),
+        "distinct_response_fraction": float(distinct_response_fraction),
+        "duplicate_response_fraction": float(1.0 - distinct_response_fraction),
+        "mean_bank_response_entropy": None if entropies.size == 0 else float(entropies.mean()),
+        "std_bank_response_entropy": None if entropies.size == 0 else float(entropies.std()),
+        "mean_bank_response_length": float(lengths.mean()),
+        "std_bank_response_length": float(lengths.std()),
+    }
+    _add_classifier_aided_summary(prompt_summary, sorted_rows)
+    prompt_summary[oracle_key] = prompt_summary["oracle_best_of_n_accuracy"]
+    return prompt_summary
+
+
+def _paired_bootstrap_from_differences(
+    differences: Sequence[float],
+    *,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    diff_array = np.asarray(differences, dtype=np.float64)
+    if diff_array.size == 0:
+        raise ValueError("Cannot bootstrap an empty set of prompt-level differences.")
+
+    rng = np.random.default_rng(seed)
+    sample_means = np.empty(bootstrap_samples, dtype=np.float64)
+    for sample_index in range(bootstrap_samples):
+        indices = rng.integers(0, diff_array.size, size=diff_array.size)
+        sample_means[sample_index] = float(diff_array[indices].mean())
+
+    ci_lower, ci_upper = np.quantile(sample_means, [0.025, 0.975]).tolist()
+    return {
+        "observed_difference": float(diff_array.mean()),
+        "ci_95_lower": float(ci_lower),
+        "ci_95_upper": float(ci_upper),
+        "num_prompts": int(diff_array.size),
+        "num_bootstrap_samples": int(bootstrap_samples),
+    }
+
+
+class _RayProgressActor:
+    def __init__(self) -> None:
+        self._events: list[dict[str, Any]] = []
+
+    def put(self, event: dict[str, Any]) -> None:
+        self._events.append(dict(event))
+
+    def drain(self) -> list[dict[str, Any]]:
+        events = self._events
+        self._events = []
+        return events
+
+
+def _worker_entry(
+    *,
+    actor_spec: ActorSpec,
+    actor_hf_dir: str,
+    assignment: WorkerAssignment,
+    examples: list[ExampleRecord],
+    dtype_name: str,
+    trust_remote_code: bool,
+    max_prompt_length: int,
+    max_new_tokens: int,
+    eos_token_ids: tuple[int, ...],
+    num_samples_per_prompt: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    base_seed: int,
+    omit_prompt_text: bool,
+    omit_response_token_ids: bool,
+    store_token_entropies: bool,
+    use_actor_cache: bool,
+    generation_backend: str,
+    vllm_logprobs_for_entropy: bool,
+    vllm_gpu_memory_utilization: float,
+    vllm_tensor_parallel_size: int,
+    vllm_max_model_len: int | None,
+    vllm_max_num_seqs: int | None,
+    vllm_enforce_eager: bool,
+    classifier_aid_config: ClassifierAidConfig | None,
+    worker_root: str,
+    progress_queue=None,
+) -> None:
+    worker_dir = Path(worker_root) / f"worker_{assignment.worker_id:03d}"
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    response_bank_path = worker_dir / "response_bank.jsonl"
+    prompt_summary_path = worker_dir / "prompt_summary.jsonl"
+    worker_summary_path = worker_dir / "worker_summary.json"
+    error_path = worker_dir / "worker_error.txt"
+
+    try:
+        start_time = time.perf_counter()
+        device = resolve_device(assignment.device_name)
+        _validate_visible_cuda_device(device, label="worker_device")
+        dtype = resolve_dtype(dtype_name)
+
+        actor_hf_path = Path(actor_hf_dir)
+        tokenizer = load_tokenizer(actor_hf_path, trust_remote_code=trust_remote_code)
+        actor = None
+        vllm_llm = None
+        if generation_backend == "torch":
+            actor = load_actor_model(
+                actor_hf_path,
+                dtype=dtype,
+                device=device,
+                trust_remote_code=trust_remote_code,
+            )
+        elif generation_backend == "vllm":
+            if LLM is None:
+                raise ImportError("vLLM is required when --generation_backend=vllm, but it is not installed.")
+            if device.type != "cuda":
+                raise ValueError("--generation_backend=vllm requires CUDA worker devices.")
+            vllm_kwargs = {
+                "model": str(actor_hf_path),
+                "tokenizer": str(actor_hf_path),
+                "dtype": _resolve_vllm_dtype_name(dtype_name),
+                "trust_remote_code": trust_remote_code,
+                "tensor_parallel_size": int(vllm_tensor_parallel_size),
+                "gpu_memory_utilization": float(vllm_gpu_memory_utilization),
+                "enforce_eager": bool(vllm_enforce_eager),
+            }
+            if vllm_max_model_len is not None:
+                vllm_kwargs["max_model_len"] = int(vllm_max_model_len)
+            if vllm_max_num_seqs is not None:
+                vllm_kwargs["max_num_seqs"] = int(vllm_max_num_seqs)
+            vllm_llm = LLM(**vllm_kwargs)
+        else:
+            raise ValueError(f"Unsupported generation backend: {generation_backend}")
+
+        critic_classifier_scorer = None
+        if classifier_aid_config is not None:
+            critic_classifier_scorer = CriticClassifierScorer(
+                config=classifier_aid_config,
+                device=device,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
+
+        entropy_moments = RunningMoments()
+        length_moments = RunningMoments()
+        local_examples = examples[assignment.prompt_start : assignment.prompt_end]
+        num_response_rows = 0
+        num_prompt_rows = 0
+        if progress_queue is not None:
+            progress_queue.put(
+                {
+                    "type": "worker_started",
+                    "worker_id": assignment.worker_id,
+                    "worker_total_prompts": len(local_examples),
+                }
+            )
+
+        with response_bank_path.open("w", encoding="utf-8") as response_file, prompt_summary_path.open(
+            "w",
+            encoding="utf-8",
+        ) as prompt_file:
+            for local_offset, example in enumerate(local_examples):
+                prompt_index = assignment.prompt_start + local_offset
+                prompt_ids = _prompt_ids_tensor(
+                    example=example,
+                    tokenizer=tokenizer,
+                    max_prompt_length=max_prompt_length,
+                    device=device,
+                )
+                response_rows: list[dict[str, Any]] = []
+                if generation_backend == "vllm":
+                    sampled_responses = sample_actor_responses_with_vllm(
+                        llm=vllm_llm,
+                        tokenizer=tokenizer,
+                        example=example,
+                        prompt_ids=prompt_ids,
+                        actor_spec=actor_spec,
+                        prompt_index=prompt_index,
+                        base_seed=base_seed,
+                        num_samples_per_prompt=num_samples_per_prompt,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                        max_new_tokens=max_new_tokens,
+                        eos_token_ids=eos_token_ids,
+                        logprobs_for_entropy=vllm_logprobs_for_entropy,
+                    )
+                else:
+                    sampled_responses = []
+                    for sample_index in range(num_samples_per_prompt):
+                        seed = _sample_seed(
+                            base_seed,
+                            actor_index=actor_spec.actor_index,
+                            prompt_index=prompt_index,
+                            sample_index=sample_index,
+                        )
+                        sampled_responses.append(
+                            sample_actor_response_with_entropy(
+                                actor=actor,
+                                tokenizer=tokenizer,
+                                example=example,
+                                prompt_ids=prompt_ids,
+                                sample_index=sample_index,
+                                seed=seed,
+                                temperature=temperature,
+                                top_p=top_p,
+                                top_k=top_k,
+                                max_new_tokens=max_new_tokens,
+                                eos_token_ids=eos_token_ids,
+                                use_actor_cache=use_actor_cache,
+                            )
+                        )
+
+                for sampled_response in sampled_responses:
+                    response_row = _build_response_row(
+                        actor_name=actor_spec.actor_name,
+                        actor_checkpoint_dir=actor_spec.checkpoint_dir,
+                        prompt_index=prompt_index,
+                        example=example,
+                        sampled_response=sampled_response,
+                        omit_prompt_text=omit_prompt_text,
+                        omit_response_token_ids=omit_response_token_ids,
+                        store_token_entropies=store_token_entropies,
+                    )
+                    if critic_classifier_scorer is not None:
+                        critic_scores = critic_classifier_scorer.score(
+                            prompt_text=example.prompt_text,
+                            response_text=sampled_response.response_text,
+                        )
+                        response_row.update(
+                            {
+                                "critic_value": float(critic_scores.critic_value),
+                                "classifier_false_high_probability": float(
+                                    critic_scores.false_high_probability
+                                ),
+                                "classifier_filtered_as_false_high": bool(critic_scores.classifier_filtered),
+                            }
+                        )
+                    response_file.write(_json_line(response_row))
+                    response_rows.append(response_row)
+                    if response_row["mean_response_entropy"] is not None:
+                        entropy_moments.add(float(response_row["mean_response_entropy"]))
+                    length_moments.add(float(response_row["response_length"]))
+                    num_response_rows += 1
+
+                prompt_summary = build_prompt_summary(
+                    actor_name=actor_spec.actor_name,
+                    actor_checkpoint_dir=actor_spec.checkpoint_dir,
+                    prompt_index=prompt_index,
+                    example=example,
+                    response_rows=response_rows,
+                    num_samples_per_prompt=num_samples_per_prompt,
+                )
+                prompt_file.write(_json_line(prompt_summary))
+                num_prompt_rows += 1
+                if progress_queue is not None:
+                    progress_queue.put(
+                        {
+                            "type": "prompt_done",
+                            "worker_id": assignment.worker_id,
+                            "worker_completed_prompts": num_prompt_rows,
+                            "worker_total_prompts": len(local_examples),
+                        }
+                    )
+
+        worker_summary = {
+            "worker_id": int(assignment.worker_id),
+            "device": str(device),
+            "prompt_start": int(assignment.prompt_start),
+            "prompt_end": int(assignment.prompt_end),
+            "num_prompts": int(num_prompt_rows),
+            "num_responses": int(num_response_rows),
+            "node_index": assignment.node_index,
+            "node_ip": assignment.node_ip,
+            "node_resource_key": assignment.node_resource_key,
+            "local_worker_index": assignment.local_worker_index,
+            "response_entropy_moments": asdict(entropy_moments),
+            "response_length_moments": asdict(length_moments),
+            "elapsed_sec": float(time.perf_counter() - start_time),
+        }
+        worker_summary_path.write_text(json.dumps(worker_summary, ensure_ascii=True, indent=2), encoding="utf-8")
+        if progress_queue is not None:
+            progress_queue.put(
+                {
+                    "type": "worker_done",
+                    "worker_id": assignment.worker_id,
+                    "worker_completed_prompts": num_prompt_rows,
+                    "worker_total_prompts": len(local_examples),
+                }
+            )
+    except Exception:
+        trace = traceback.format_exc()
+        error_path.write_text(trace, encoding="utf-8")
+        if progress_queue is not None:
+            progress_queue.put(
+                {
+                    "type": "worker_error",
+                    "worker_id": assignment.worker_id,
+                    "traceback": trace,
+                }
+            )
+        raise
+
+
+def _start_worker_processes(
+    *,
+    actor_spec: ActorSpec,
+    actor_hf_dir: Path,
+    assignments: Sequence[WorkerAssignment],
+    examples: list[ExampleRecord],
+    args: argparse.Namespace,
+    eos_token_ids: tuple[int, ...],
+    worker_root: Path,
+) -> tuple[Any, list[tuple[mp.Process, WorkerAssignment]]]:
+    context = mp.get_context("spawn")
+    progress_queue = context.Queue()
+    processes: list[tuple[mp.Process, WorkerAssignment]] = []
+    for assignment in assignments:
+        process = context.Process(
+            target=_worker_entry,
+            kwargs={
+                "actor_spec": actor_spec,
+                "actor_hf_dir": str(actor_hf_dir),
+                "assignment": assignment,
+                "examples": examples,
+                "dtype_name": args.dtype,
+                "trust_remote_code": args.trust_remote_code,
+                "max_prompt_length": args.max_prompt_length,
+                "max_new_tokens": args.max_new_tokens,
+                "eos_token_ids": eos_token_ids,
+                "num_samples_per_prompt": args.num_samples_per_prompt,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "base_seed": args.seed,
+                "omit_prompt_text": args.omit_prompt_text,
+                "omit_response_token_ids": args.omit_response_token_ids,
+                "store_token_entropies": args.store_token_entropies,
+                "use_actor_cache": not args.disable_actor_cache,
+                "generation_backend": args.generation_backend,
+                "vllm_logprobs_for_entropy": args.vllm_logprobs_for_entropy,
+                "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                "vllm_tensor_parallel_size": args.vllm_tensor_parallel_size,
+                "vllm_max_model_len": args.vllm_max_model_len,
+                "vllm_max_num_seqs": args.vllm_max_num_seqs,
+                "vllm_enforce_eager": args.vllm_enforce_eager,
+                "classifier_aid_config": args.classifier_aid_config,
+                "worker_root": str(worker_root),
+                "progress_queue": progress_queue,
+            },
+            name=f"actor_proposal_worker_{actor_spec.actor_name}_{assignment.worker_id}",
+        )
+        process.start()
+        processes.append((process, assignment))
+    return progress_queue, processes
+
+
+def _assert_worker_processes_healthy(
+    *,
+    processes: Sequence[tuple[mp.Process, WorkerAssignment]],
+    worker_root: Path,
+) -> None:
+    for process, assignment in processes:
+        if process.exitcode not in (None, 0):
+            error_path = worker_root / f"worker_{assignment.worker_id:03d}" / "worker_error.txt"
+            if error_path.exists():
+                raise RuntimeError(
+                    f"Worker {assignment.worker_id} failed with exit code {process.exitcode}.\n"
+                    f"{error_path.read_text(encoding='utf-8')}"
+                )
+            raise RuntimeError(f"Worker {assignment.worker_id} failed with exit code {process.exitcode}.")
+
+
+def _join_worker_processes(
+    *,
+    processes: Sequence[tuple[mp.Process, WorkerAssignment]],
+    worker_root: Path,
+) -> None:
+    for process, assignment in processes:
+        process.join()
+        if process.exitcode != 0:
+            error_path = worker_root / f"worker_{assignment.worker_id:03d}" / "worker_error.txt"
+            if error_path.exists():
+                raise RuntimeError(
+                    f"Worker {assignment.worker_id} failed with exit code {process.exitcode}.\n"
+                    f"{error_path.read_text(encoding='utf-8')}"
+                )
+            raise RuntimeError(f"Worker {assignment.worker_id} failed with exit code {process.exitcode}.")
+
+
+def _ray_node_entry_remote(**kwargs) -> dict[str, Any]:
+    assignments: list[WorkerAssignment] = kwargs["assignments"]
+    progress_actor = kwargs["progress_actor"]
+    progress_queue, processes = _start_worker_processes(
+        actor_spec=kwargs["actor_spec"],
+        actor_hf_dir=Path(kwargs["actor_hf_dir"]),
+        assignments=assignments,
+        examples=kwargs["examples"],
+        args=kwargs["args"],
+        eos_token_ids=kwargs["eos_token_ids"],
+        worker_root=Path(kwargs["worker_root"]),
+    )
+    worker_root = Path(kwargs["worker_root"])
+    completed_workers = 0
+    while completed_workers < len(assignments):
+        try:
+            event = progress_queue.get(timeout=RAY_PROGRESS_POLL_INTERVAL_SEC)
+        except Empty:
+            _assert_worker_processes_healthy(processes=processes, worker_root=worker_root)
+            continue
+
+        progress_actor.put.remote(event)
+        if event.get("type") == "worker_done":
+            completed_workers += 1
+        elif event.get("type") == "worker_error":
+            raise RuntimeError(
+                f"Worker {event.get('worker_id')} reported an error.\n"
+                f"{event.get('traceback', 'No traceback provided.')}"
+            )
+
+    _join_worker_processes(processes=processes, worker_root=worker_root)
+    return {
+        "node_index": kwargs["node_index"],
+        "node_ip": kwargs["node_ip"],
+        "worker_ids": [int(assignment.worker_id) for assignment in assignments],
+    }
+
+
+def run_ray_multi_worker(
+    *,
+    output_dir: Path,
+    actor_spec: ActorSpec,
+    actor_hf_dir: Path,
+    examples: list[ExampleRecord],
+    worker_assignments: list[WorkerAssignment],
+    args: argparse.Namespace,
+    eos_token_ids: tuple[int, ...],
+    response_bank_file,
+    prompt_summary_file,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not worker_assignments:
+        raise ValueError("No worker assignments were created.")
+    if args.ray_num_cpus_per_worker <= 0:
+        raise ValueError(f"--ray_num_cpus_per_worker must be > 0, got {args.ray_num_cpus_per_worker}.")
+
+    ray_module = _require_ray()
+    if not ray_module.is_initialized():
+        raise RuntimeError("Ray must be initialized before running cross-node actor proposal workers.")
+
+    worker_root = output_dir / "_worker_tmp"
+    shutil.rmtree(worker_root, ignore_errors=True)
+    worker_root.mkdir(parents=True, exist_ok=True)
+
+    progress_actor = ray_module.remote(num_cpus=0)(_RayProgressActor).remote()
+    node_execution_specs = _build_ray_node_execution_specs(
+        worker_assignments=worker_assignments,
+        ray_num_cpus_per_worker=args.ray_num_cpus_per_worker,
+    )
+    node_remote = ray_module.remote(max_retries=0)(_ray_node_entry_remote)
+
+    node_refs = []
+    ref_to_node_spec: dict[Any, dict[str, Any]] = {}
+    for node_spec in node_execution_specs:
+        node_resource_key = node_spec["node_resource_key"]
+        if node_resource_key is None:
+            raise ValueError(
+                f"Ray node execution spec for node {node_spec['node_ip']} is missing node_resource_key."
+            )
+        node_ref = node_remote.options(
+            num_cpus=float(node_spec["num_cpus"]),
+            num_gpus=float(node_spec["num_gpus"]),
+            resources={node_resource_key: RAY_NODE_RESOURCE_FRACTION},
+        ).remote(
+            node_index=node_spec["node_index"],
+            node_ip=node_spec["node_ip"],
+            assignments=node_spec["assignments"],
+            actor_spec=actor_spec,
+            actor_hf_dir=str(actor_hf_dir),
+            examples=examples,
+            args=args,
+            eos_token_ids=eos_token_ids,
+            worker_root=str(worker_root),
+            progress_actor=progress_actor,
+        )
+        node_refs.append(node_ref)
+        ref_to_node_spec[node_ref] = node_spec
+
+    total_prompts = len(examples)
+    completed_prompts = 0
+    completed_workers = 0
+    worker_progress: dict[int, dict[str, Any]] = {
+        assignment.worker_id: {"done": 0, "total": assignment.num_prompts} for assignment in worker_assignments
+    }
+
+    pending_refs = list(node_refs)
+    with tqdm(
+        total=total_prompts,
+        desc=f"actor_proposal_diagnostic[{actor_spec.actor_name}]",
+        unit="prompt",
+        dynamic_ncols=True,
+    ) as progress_bar:
+        progress_bar.set_postfix_str(_progress_postfix(worker_progress))
+        while completed_prompts < total_prompts or completed_workers < len(worker_assignments):
+            events = ray_module.get(progress_actor.drain.remote())
+            for event in events:
+                event_type = event.get("type")
+                worker_id = int(event.get("worker_id", -1))
+                if event_type == "worker_started":
+                    worker_progress.setdefault(worker_id, {})
+                    worker_progress[worker_id]["total"] = int(event.get("worker_total_prompts", 0))
+                elif event_type == "prompt_done":
+                    completed_prompts += 1
+                    worker_progress.setdefault(worker_id, {})
+                    worker_progress[worker_id]["done"] = int(event.get("worker_completed_prompts", 0))
+                    worker_progress[worker_id]["total"] = int(event.get("worker_total_prompts", 0))
+                    progress_bar.update(1)
+                elif event_type == "worker_done":
+                    completed_workers += 1
+                    worker_progress.setdefault(worker_id, {})
+                    worker_progress[worker_id]["done"] = int(event.get("worker_completed_prompts", 0))
+                    worker_progress[worker_id]["total"] = int(event.get("worker_total_prompts", 0))
+                elif event_type == "worker_error":
+                    raise RuntimeError(
+                        f"Worker {worker_id} reported an error.\n{event.get('traceback', 'No traceback provided.')}"
+                    )
+                progress_bar.set_postfix_str(_progress_postfix(worker_progress))
+
+            if pending_refs:
+                done_refs, pending_refs = ray_module.wait(
+                    pending_refs,
+                    num_returns=1,
+                    timeout=RAY_PROGRESS_POLL_INTERVAL_SEC,
+                )
+                for done_ref in done_refs:
+                    node_spec = ref_to_node_spec[done_ref]
+                    try:
+                        ray_module.get(done_ref)
+                    except Exception as exc:
+                        for assignment in node_spec["assignments"]:
+                            error_path = worker_root / f"worker_{assignment.worker_id:03d}" / "worker_error.txt"
+                            if error_path.exists():
+                                raise RuntimeError(
+                                    f"Worker {assignment.worker_id} failed on Ray node {assignment.node_ip}.\n"
+                                    f"{error_path.read_text(encoding='utf-8')}"
+                                ) from exc
+                        raise RuntimeError(
+                            f"Ray node task failed on node {node_spec['node_ip']} "
+                            f"for workers {[assignment.worker_id for assignment in node_spec['assignments']]}."
+                        ) from exc
+            else:
+                time.sleep(RAY_PROGRESS_POLL_INTERVAL_SEC)
+
+    if node_refs:
+        try:
+            ray_module.get(node_refs)
+        except Exception:
+            for assignment in worker_assignments:
+                error_path = worker_root / f"worker_{assignment.worker_id:03d}" / "worker_error.txt"
+                if error_path.exists():
+                    raise RuntimeError(
+                        f"Worker {assignment.worker_id} failed on Ray node {assignment.node_ip}.\n"
+                        f"{error_path.read_text(encoding='utf-8')}"
+                    )
+            raise
+
+    return _collect_worker_outputs(
+        worker_root=worker_root,
+        assignments=worker_assignments,
+        response_bank_file=response_bank_file,
+        prompt_summary_file=prompt_summary_file,
+    )
+
+
+def _collect_worker_outputs(
+    *,
+    worker_root: Path,
+    assignments: Sequence[WorkerAssignment],
+    response_bank_file,
+    prompt_summary_file,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    prompt_summaries: list[dict[str, Any]] = []
+    worker_summaries: list[dict[str, Any]] = []
+    for assignment in sorted(assignments, key=lambda item: int(item.worker_id)):
+        worker_dir = worker_root / f"worker_{assignment.worker_id:03d}"
+        response_path = worker_dir / "response_bank.jsonl"
+        prompt_path = worker_dir / "prompt_summary.jsonl"
+        summary_path = worker_dir / "worker_summary.json"
+
+        with response_path.open("r", encoding="utf-8") as response_file:
+            for line in response_file:
+                if line.strip():
+                    response_bank_file.write(line)
+
+        with prompt_path.open("r", encoding="utf-8") as prompt_file:
+            for line in prompt_file:
+                if not line.strip():
+                    continue
+                prompt_summary_file.write(line)
+                prompt_summaries.append(json.loads(line))
+
+        worker_summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
+    return prompt_summaries, worker_summaries
+
+
+def _aggregate_actor_metrics(
+    *,
+    actor_name: str,
+    actor_checkpoint_dir: str,
+    prompt_summaries: Sequence[dict[str, Any]],
+    worker_summaries: Sequence[dict[str, Any]],
+    num_samples_per_prompt: int,
+) -> dict[str, Any]:
+    if not prompt_summaries:
+        raise ValueError(f"Actor {actor_name} produced no prompt summaries.")
+
+    oracle_key = _oracle_metric_key(num_samples_per_prompt)
+    entropy_moments = RunningMoments()
+    length_moments = RunningMoments()
+    for worker_summary in worker_summaries:
+        entropy_moments.merge(RunningMoments(**worker_summary["response_entropy_moments"]))
+        length_moments.merge(RunningMoments(**worker_summary["response_length_moments"]))
+
+    actor_metrics = {
+        "actor_checkpoint_dir": actor_checkpoint_dir,
+        "num_prompts": int(len(prompt_summaries)),
+        "num_responses": int(sum(int(worker_summary["num_responses"]) for worker_summary in worker_summaries)),
+        "sampled_single_accuracy": float(
+            np.mean([float(prompt_summary["sampled_single_accuracy"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_sample_accuracy": float(
+            np.mean([float(prompt_summary["mean_sample_accuracy"]) for prompt_summary in prompt_summaries])
+        ),
+        "oracle_best_of_n_accuracy": float(
+            np.mean([float(prompt_summary["oracle_best_of_n_accuracy"]) for prompt_summary in prompt_summaries])
+        ),
+        "fraction_prompts_with_at_least_one_success": float(
+            np.mean([float(prompt_summary["has_success"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_num_successes_per_prompt": float(
+            np.mean([float(prompt_summary["num_successes_in_bank"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_success_rate_in_bank": float(
+            np.mean([float(prompt_summary["success_rate_in_bank"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_outcome_variance_within_prompt": float(
+            np.mean([float(prompt_summary["outcome_variance"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_response_entropy": entropy_moments.mean(),
+        "std_response_entropy_across_responses": entropy_moments.std(),
+        "mean_response_length": length_moments.mean(),
+        "mean_distinct_responses_per_prompt": float(
+            np.mean([float(prompt_summary["num_distinct_responses"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_distinct_response_fraction": float(
+            np.mean([float(prompt_summary["distinct_response_fraction"]) for prompt_summary in prompt_summaries])
+        ),
+        "mean_duplicate_response_fraction": float(
+            np.mean([float(prompt_summary["duplicate_response_fraction"]) for prompt_summary in prompt_summaries])
+        ),
+    }
+    if "critic_best_of_n_accuracy" in prompt_summaries[0]:
+        actor_metrics.update(
+            {
+                "critic_best_of_n_accuracy": float(
+                    np.mean([float(prompt_summary["critic_best_of_n_accuracy"]) for prompt_summary in prompt_summaries])
+                ),
+                "classifier_aided_best_of_n_accuracy": float(
+                    np.mean(
+                        [
+                            float(prompt_summary["classifier_aided_best_of_n_accuracy"])
+                            for prompt_summary in prompt_summaries
+                        ]
+                    )
+                ),
+                "classifier_aid_mean_filtered_count": float(
+                    np.mean([float(prompt_summary["classifier_aid_filtered_count"]) for prompt_summary in prompt_summaries])
+                ),
+                "classifier_aid_mean_kept_count": float(
+                    np.mean([float(prompt_summary["classifier_aid_kept_count"]) for prompt_summary in prompt_summaries])
+                ),
+                "classifier_aid_fallback_prompt_fraction": float(
+                    np.mean([float(prompt_summary["classifier_aid_fallback_used"]) for prompt_summary in prompt_summaries])
+                ),
+                "classifier_aided_minus_critic_best_of_n_accuracy": float(
+                    np.mean(
+                        [
+                            float(prompt_summary["classifier_aided_best_of_n_accuracy"])
+                            - float(prompt_summary["critic_best_of_n_accuracy"])
+                            for prompt_summary in prompt_summaries
+                        ]
+                    )
+                ),
+            }
+        )
+    actor_metrics[oracle_key] = actor_metrics["oracle_best_of_n_accuracy"]
+    return actor_metrics
+
+
+def _sorted_prompt_summaries(prompt_summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(prompt_summaries, key=lambda row: int(row["prompt_index"]))
+
+
+def _pairwise_prompt_metric_differences(
+    *,
+    actor_a_prompts: Sequence[dict[str, Any]],
+    actor_b_prompts: Sequence[dict[str, Any]],
+) -> dict[str, list[float]]:
+    prompts_a = _sorted_prompt_summaries(actor_a_prompts)
+    prompts_b = _sorted_prompt_summaries(actor_b_prompts)
+    if len(prompts_a) != len(prompts_b):
+        raise ValueError("Actors must be evaluated on the same number of prompts for paired comparison.")
+
+    differences: dict[str, list[float]] = {
+        "sampled_single_accuracy": [],
+        "mean_sample_accuracy": [],
+        "oracle_best_of_n_accuracy": [],
+        "fraction_prompts_with_at_least_one_success": [],
+        "mean_outcome_variance_within_prompt": [],
+        "mean_response_entropy": [],
+        "mean_distinct_response_fraction": [],
+        "mean_response_length": [],
+    }
+    for prompt_a, prompt_b in zip(prompts_a, prompts_b, strict=True):
+        if int(prompt_a["prompt_index"]) != int(prompt_b["prompt_index"]):
+            raise ValueError(
+                "Actors must share the same prompt ordering for paired comparison, but prompt indices "
+                f"{prompt_a['prompt_index']} and {prompt_b['prompt_index']} were encountered."
+            )
+        differences["sampled_single_accuracy"].append(
+            float(prompt_a["sampled_single_accuracy"]) - float(prompt_b["sampled_single_accuracy"])
+        )
+        differences["mean_sample_accuracy"].append(
+            float(prompt_a["mean_sample_accuracy"]) - float(prompt_b["mean_sample_accuracy"])
+        )
+        differences["oracle_best_of_n_accuracy"].append(
+            float(prompt_a["oracle_best_of_n_accuracy"]) - float(prompt_b["oracle_best_of_n_accuracy"])
+        )
+        differences["fraction_prompts_with_at_least_one_success"].append(
+            float(prompt_a["has_success"]) - float(prompt_b["has_success"])
+        )
+        differences["mean_outcome_variance_within_prompt"].append(
+            float(prompt_a["outcome_variance"]) - float(prompt_b["outcome_variance"])
+        )
+        entropy_a = prompt_a["mean_bank_response_entropy"]
+        entropy_b = prompt_b["mean_bank_response_entropy"]
+        if entropy_a is not None and entropy_b is not None:
+            differences["mean_response_entropy"].append(float(entropy_a) - float(entropy_b))
+        differences["mean_distinct_response_fraction"].append(
+            float(prompt_a["distinct_response_fraction"]) - float(prompt_b["distinct_response_fraction"])
+        )
+        differences["mean_response_length"].append(
+            float(prompt_a["mean_bank_response_length"]) - float(prompt_b["mean_bank_response_length"])
+        )
+    return differences
+
+
+def build_pairwise_comparisons(
+    *,
+    actor_prompt_summaries: dict[str, list[dict[str, Any]]],
+    actor_names: Sequence[str],
+    bootstrap_samples: int,
+    base_seed: int,
+    num_samples_per_prompt: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    comparisons: dict[str, dict[str, Any]] = {}
+    paired_bootstrap: dict[str, dict[str, Any]] = {}
+    oracle_key = _oracle_metric_key(num_samples_per_prompt)
+
+    for pair_index, (actor_a, actor_b) in enumerate(combinations(actor_names, 2)):
+        comparison_name = f"{actor_a}_minus_{actor_b}"
+        differences = _pairwise_prompt_metric_differences(
+            actor_a_prompts=actor_prompt_summaries[actor_a],
+            actor_b_prompts=actor_prompt_summaries[actor_b],
+        )
+
+        comparisons[comparison_name] = {
+            "comparison_name": comparison_name,
+            "sampled_single_accuracy_diff": float(np.mean(differences["sampled_single_accuracy"])),
+            "mean_sample_accuracy_diff": float(np.mean(differences["mean_sample_accuracy"])),
+            "oracle_best_of_n_accuracy_diff": float(np.mean(differences["oracle_best_of_n_accuracy"])),
+            "fraction_prompts_with_at_least_one_success_diff": float(
+                np.mean(differences["fraction_prompts_with_at_least_one_success"])
+            ),
+            "mean_outcome_variance_within_prompt_diff": float(
+                np.mean(differences["mean_outcome_variance_within_prompt"])
+            ),
+            "mean_response_entropy_diff": (
+                None
+                if not differences["mean_response_entropy"]
+                else float(np.mean(differences["mean_response_entropy"]))
+            ),
+            "mean_distinct_response_fraction_diff": float(
+                np.mean(differences["mean_distinct_response_fraction"])
+            ),
+            "mean_response_length_diff": float(np.mean(differences["mean_response_length"])),
+        }
+        comparisons[comparison_name][f"{oracle_key}_diff"] = comparisons[comparison_name]["oracle_best_of_n_accuracy_diff"]
+
+        paired_bootstrap[comparison_name] = {
+            "sampled_single_accuracy": _paired_bootstrap_from_differences(
+                differences["sampled_single_accuracy"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 1,
+            ),
+            "mean_sample_accuracy": _paired_bootstrap_from_differences(
+                differences["mean_sample_accuracy"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 2,
+            ),
+            "oracle_best_of_n_accuracy": _paired_bootstrap_from_differences(
+                differences["oracle_best_of_n_accuracy"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 3,
+            ),
+            "fraction_prompts_with_at_least_one_success": _paired_bootstrap_from_differences(
+                differences["fraction_prompts_with_at_least_one_success"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 4,
+            ),
+            "mean_outcome_variance_within_prompt": _paired_bootstrap_from_differences(
+                differences["mean_outcome_variance_within_prompt"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 5,
+            ),
+            "mean_response_entropy": (
+                None
+                if not differences["mean_response_entropy"]
+                else _paired_bootstrap_from_differences(
+                    differences["mean_response_entropy"],
+                    bootstrap_samples=bootstrap_samples,
+                    seed=base_seed + pair_index * 10_000 + 6,
+                )
+            ),
+            "distinct_response_fraction": _paired_bootstrap_from_differences(
+                differences["mean_distinct_response_fraction"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 7,
+            ),
+            "response_length": _paired_bootstrap_from_differences(
+                differences["mean_response_length"],
+                bootstrap_samples=bootstrap_samples,
+                seed=base_seed + pair_index * 10_000 + 8,
+            ),
+        }
+        paired_bootstrap[comparison_name][oracle_key] = paired_bootstrap[comparison_name]["oracle_best_of_n_accuracy"]
+
+    return comparisons, paired_bootstrap
+
+
+def _plot_actor_headroom(
+    *,
+    actor_metrics: dict[str, dict[str, Any]],
+    actor_names: Sequence[str],
+    num_samples_per_prompt: int,
+    output_path: Path,
+    dpi: int,
+) -> None:
+    if plt is None:
+        raise RuntimeError(
+            "matplotlib is required for plot generation but could not be imported."
+        ) from MATPLOTLIB_IMPORT_ERROR
+
+    oracle_key = _oracle_metric_key(num_samples_per_prompt)
+    x_positions = np.arange(len(actor_names))
+    width = 0.24
+    figure, axis = plt.subplots(figsize=(8.0, 4.8))
+
+    axis.bar(
+        x_positions - width,
+        [float(actor_metrics[name]["sampled_single_accuracy"]) for name in actor_names],
+        width=width,
+        label="Sampled single",
+    )
+    axis.bar(
+        x_positions,
+        [float(actor_metrics[name]["mean_sample_accuracy"]) for name in actor_names],
+        width=width,
+        label="Mean sample",
+    )
+    axis.bar(
+        x_positions + width,
+        [float(actor_metrics[name][oracle_key]) for name in actor_names],
+        width=width,
+        label=f"Oracle best-of-{num_samples_per_prompt}",
+    )
+
+    axis.set_xticks(x_positions)
+    axis.set_xticklabels(list(actor_names), rotation=15, ha="right")
+    axis.set_ylabel("Task Score / Accuracy")
+    axis.set_title("Actor Proposal Headroom")
+    axis.grid(True, axis="y", linestyle="--", linewidth=0.7, alpha=0.5)
+    axis.legend(frameon=False)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi)
+    plt.close(figure)
+
+
+def _plot_prompt_scatter(
+    *,
+    actor_prompt_summaries: dict[str, list[dict[str, Any]]],
+    actor_names: Sequence[str],
+    x_field: str,
+    y_field: str,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    output_path: Path,
+    dpi: int,
+) -> None:
+    if plt is None:
+        raise RuntimeError(
+            "matplotlib is required for plot generation but could not be imported."
+        ) from MATPLOTLIB_IMPORT_ERROR
+
+    figure, axis = plt.subplots(figsize=(7.2, 4.8))
+    plotted_any = False
+    for actor_name in actor_names:
+        rows = _sorted_prompt_summaries(actor_prompt_summaries[actor_name])
+        xs: list[float] = []
+        ys: list[float] = []
+        for row in rows:
+            x_value = row.get(x_field)
+            y_value = row.get(y_field)
+            if x_value is None or y_value is None:
+                continue
+            xs.append(float(x_value))
+            ys.append(float(y_value))
+        if xs:
+            axis.scatter(xs, ys, alpha=0.7, s=28, label=actor_name)
+            plotted_any = True
+
+    if not plotted_any:
+        plt.close(figure)
+        return
+
+    axis.set_xlabel(xlabel)
+    axis.set_ylabel(ylabel)
+    axis.set_title(title)
+    axis.grid(True, linestyle="--", linewidth=0.7, alpha=0.5)
+    axis.legend(frameon=False)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi)
+    plt.close(figure)
+
+
+def _plot_outcome_variance(
+    *,
+    actor_metrics: dict[str, dict[str, Any]],
+    actor_names: Sequence[str],
+    output_path: Path,
+    dpi: int,
+) -> None:
+    if plt is None:
+        raise RuntimeError(
+            "matplotlib is required for plot generation but could not be imported."
+        ) from MATPLOTLIB_IMPORT_ERROR
+
+    x_positions = np.arange(len(actor_names))
+    figure, axis = plt.subplots(figsize=(7.0, 4.5))
+    axis.bar(
+        x_positions,
+        [float(actor_metrics[name]["mean_outcome_variance_within_prompt"]) for name in actor_names],
+        width=0.55,
+    )
+    axis.set_xticks(x_positions)
+    axis.set_xticklabels(list(actor_names), rotation=15, ha="right")
+    axis.set_ylabel("Mean Within-Prompt Outcome Variance")
+    axis.set_title("Outcome Variance by Actor")
+    axis.grid(True, axis="y", linestyle="--", linewidth=0.7, alpha=0.5)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi)
+    plt.close(figure)
+
+
+def _write_output_readme(
+    *,
+    output_dir: Path,
+    args: argparse.Namespace,
+    actor_names: Sequence[str],
+    actor_metrics: dict[str, dict[str, Any]],
+) -> None:
+    oracle_phrase = f"oracle_best_of_{args.num_samples_per_prompt}_accuracy"
+    lines: list[str] = [
+        "# Actor Proposal Quality Diagnostic",
+        "",
+        "This diagnostic measures the proposal quality and search headroom of each frozen actor.",
+        "",
+        "Key quantities:",
+        "- sampled_single_accuracy: pass@1-like performance from one sample.",
+        f"- {oracle_phrase}: upper bound if a perfect selector chooses the best response in the bank.",
+        "- fraction_prompts_with_at_least_one_success: how often search has any correct option available.",
+        "- outcome_variance_within_prompt: whether sampled responses from the same prompt have mixed outcomes; high variance means there is meaningful selection opportunity.",
+        "- response_entropy and distinct_response_fraction: proposal diversity diagnostics.",
+        "",
+        "Interpretation:",
+        f"- High {oracle_phrase} with low sampled_single_accuracy means large search headroom.",
+        f"- Low {oracle_phrase} means chunk/value guidance cannot help much because the actor rarely proposes correct responses.",
+        "- High entropy/diversity may create more search headroom, but may also make critic ranking harder in later experiments.",
+        "",
+        "Implementation notes:",
+        "- Torch backend token entropy is computed from the raw actor next-token distribution before temperature/top-p/top-k sampling is applied, matching the requested experiment definition.",
+        "- vLLM backend marks entropy fields as null unless `--vllm_logprobs_for_entropy` is enabled and full-vocabulary logprobs are available.",
+        "- Distinct responses are computed after `response.strip()` normalization.",
+        "- When classifier aid is enabled, critic_best_of_n selects the max critic_value response; classifier_aided_best_of_n first drops candidates flagged as false-high and falls back to critic ranking if all are dropped.",
+        "",
+        "Run config:",
+        f"- Dataset: `{args.dataset_path}`",
+        f"- Actor names: `{list(actor_names)}`",
+        f"- Max examples: `{args.max_examples}`",
+        f"- Num samples per prompt: `{args.num_samples_per_prompt}`",
+        f"- Temperature / top-p / top-k: `{args.temperature}` / `{args.top_p}` / `{args.top_k}`",
+        f"- Seed: `{args.seed}`",
+        f"- Worker devices: `{args.worker_devices}`",
+        f"- Generation backend: `{args.generation_backend}`",
+        f"- vLLM logprobs for entropy: `{args.vllm_logprobs_for_entropy}`",
+        f"- Classifier aid dir: `{args.classifier_aid_dir}`",
+        f"- Critic model dir: `{args.critic_model_dir}`",
+        f"- Classifier aid threshold: `{args.classifier_aid_threshold}`",
+        "",
+        "Files:",
+        "- `response_bank.jsonl`: one row per sampled response with task score, entropy diagnostics, and optional token ids / entropy traces.",
+        "- `prompt_summary.jsonl`: one row per actor/prompt with headroom, diversity, entropy, and length aggregates.",
+        "- `summary_metrics.json`: actor-level aggregates, pairwise comparisons, and paired bootstrap confidence intervals.",
+        "- `actor_headroom_accuracy.png`: grouped bar chart for sampled single, mean sample, and oracle best-of-N accuracy.",
+        "- `entropy_vs_oracle_success.png`: prompt-level entropy vs oracle best-of-N success scatter plot; omitted when entropy is unavailable.",
+        "- `diversity_vs_oracle_success.png`: prompt-level diversity vs oracle best-of-N success scatter plot.",
+        "- `outcome_variance_by_actor.png`: actor-level within-prompt outcome variance bar chart.",
+        "",
+        "Quick read:",
+    ]
+    for actor_name in actor_names:
+        metrics = actor_metrics[actor_name]
+        mean_entropy = metrics["mean_response_entropy"]
+        mean_entropy_text = "null" if mean_entropy is None else f"{mean_entropy:.6f}"
+        critic_text = ""
+        if "classifier_aided_best_of_n_accuracy" in metrics:
+            critic_text = (
+                f", critic_best_of_n={metrics['critic_best_of_n_accuracy']:.6f}, "
+                f"classifier_aided_best_of_n={metrics['classifier_aided_best_of_n_accuracy']:.6f}, "
+                f"aid_delta={metrics['classifier_aided_minus_critic_best_of_n_accuracy']:.6f}"
+            )
+        lines.append(
+            f"- {actor_name}: sampled_single={metrics['sampled_single_accuracy']:.6f}, "
+            f"mean_sample={metrics['mean_sample_accuracy']:.6f}, "
+            f"oracle_best_of_n={metrics['oracle_best_of_n_accuracy']:.6f}, "
+            f"has_success={metrics['fraction_prompts_with_at_least_one_success']:.6f}, "
+            f"mean_entropy={mean_entropy_text}, "
+            f"distinct_fraction={metrics['mean_distinct_response_fraction']:.6f}"
+            f"{critic_text}"
+        )
+
+    (output_dir / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    args.classifier_aid_config = _resolve_classifier_aid_config(args)
+    if len(args.actor_checkpoint_dirs) != len(args.actor_names):
+        raise ValueError(
+            "--actor_checkpoint_dirs and --actor_names must have the same number of entries "
+            f"(received {len(args.actor_checkpoint_dirs)} and {len(args.actor_names)})."
+        )
+    if len(set(args.actor_names)) != len(args.actor_names):
+        raise ValueError("--actor_names must be unique so outputs can be keyed by actor name.")
+    if args.max_examples <= 0:
+        raise ValueError(f"--max_examples must be > 0, got {args.max_examples}")
+    if args.num_samples_per_prompt <= 0:
+        raise ValueError(f"--num_samples_per_prompt must be > 0, got {args.num_samples_per_prompt}")
+    if args.max_prompt_length <= 0:
+        raise ValueError(f"--max_prompt_length must be > 0, got {args.max_prompt_length}")
+    if args.max_new_tokens <= 0:
+        raise ValueError(f"--max_new_tokens must be > 0, got {args.max_new_tokens}")
+    if args.bootstrap_samples <= 0:
+        raise ValueError(f"--bootstrap_samples must be > 0, got {args.bootstrap_samples}")
+    if args.ray_num_cpus_per_worker <= 0:
+        raise ValueError(f"--ray_num_cpus_per_worker must be > 0, got {args.ray_num_cpus_per_worker}")
+    if args.top_k < 0:
+        raise ValueError(f"--top_k must be >= 0, got {args.top_k}")
+    if args.generation_backend == "vllm" and LLM is None:
+        raise ImportError("vLLM is required when --generation_backend=vllm, but it is not installed.")
+    if args.generation_backend != "vllm" and args.vllm_logprobs_for_entropy:
+        raise ValueError("--vllm_logprobs_for_entropy is only valid with --generation_backend=vllm.")
+    if not (0.0 < args.vllm_gpu_memory_utilization <= 1.0):
+        raise ValueError(
+            "--vllm_gpu_memory_utilization must be in (0, 1], "
+            f"got {args.vllm_gpu_memory_utilization}"
+        )
+    if args.vllm_tensor_parallel_size <= 0:
+        raise ValueError(f"--vllm_tensor_parallel_size must be > 0, got {args.vllm_tensor_parallel_size}")
+    if args.vllm_max_model_len is not None and args.vllm_max_model_len <= 0:
+        raise ValueError(f"--vllm_max_model_len must be > 0, got {args.vllm_max_model_len}")
+    if args.vllm_max_num_seqs is not None and args.vllm_max_num_seqs <= 0:
+        raise ValueError(f"--vllm_max_num_seqs must be > 0, got {args.vllm_max_num_seqs}")
+    if not args.skip_plots and plt is None:
+        raise RuntimeError(
+            "matplotlib is required for plot generation but could not be imported."
+        ) from MATPLOTLIB_IMPORT_ERROR
+
+    num_actors = len(args.actor_names)
+    actor_merged_roots = _resolve_optional_per_actor_list(
+        args.actor_merged_roots,
+        num_actors=num_actors,
+        argument_name="--actor_merged_roots",
+    )
+    actor_hf_source_dirs = _resolve_optional_per_actor_list(
+        args.actor_hf_source_dirs,
+        num_actors=num_actors,
+        argument_name="--actor_hf_source_dirs",
+    )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    worker_root = output_dir / "_worker_tmp"
+    worker_root.mkdir(parents=True, exist_ok=True)
+
+    actor_specs = [
+        ActorSpec(
+            actor_index=actor_index,
+            actor_name=actor_name,
+            checkpoint_dir=str(Path(checkpoint_dir).resolve()),
+            merged_root=None if actor_merged_roots[actor_index] is None else str(Path(actor_merged_roots[actor_index]).resolve()),
+            hf_source_dir=(
+                None
+                if actor_hf_source_dirs[actor_index] is None
+                else str(Path(actor_hf_source_dirs[actor_index]).resolve())
+            ),
+        )
+        for actor_index, (actor_name, checkpoint_dir) in enumerate(
+            zip(args.actor_names, args.actor_checkpoint_dirs, strict=True)
+        )
+    ]
+
+    actor_hf_dirs: dict[str, Path] = {}
+    tokenizer_fingerprints: dict[str, dict[str, Any]] = {}
+    eos_token_ids_by_actor: dict[str, tuple[int, ...]] = {}
+    for actor_spec in actor_specs:
+        actor_hf_dir = ensure_merged_component_checkpoint(
+            Path(actor_spec.checkpoint_dir),
+            component="actor",
+            merged_root=Path(actor_spec.merged_root) if actor_spec.merged_root else None,
+            hf_source_dir=Path(actor_spec.hf_source_dir) if actor_spec.hf_source_dir else None,
+            skip_merge=args.skip_merge,
+        )
+        actor_hf_dirs[actor_spec.actor_name] = actor_hf_dir
+        tokenizer = load_tokenizer(actor_hf_dir, trust_remote_code=args.trust_remote_code)
+        tokenizer_fingerprints[actor_spec.actor_name] = _tokenizer_fingerprint(actor_hf_dir)
+        eos_token_ids_by_actor[actor_spec.actor_name] = resolve_eos_token_ids(actor_hf_dir, tokenizer)
+    _assert_shared_tokenizer(tokenizer_fingerprints)
+
+    reference_tokenizer = load_tokenizer(
+        actor_hf_dirs[actor_specs[0].actor_name],
+        trust_remote_code=args.trust_remote_code,
+    )
+    examples = load_examples(
+        args.dataset_path,
+        tokenizer=reference_tokenizer,
+        prompt_key=args.prompt_key,
+        response_key=args.response_key,
+        start_index=args.start_index,
+        max_examples=args.max_examples,
+        shuffle_examples=args.shuffle_examples,
+        seed=args.seed,
+        pretokenize_max_length=args.max_prompt_length,
+    )
+    if not examples:
+        raise ValueError("No evaluation examples were loaded. Check --dataset_path and slicing arguments.")
+
+    worker_devices = [device if device else None for device in (args.worker_devices or [None])]
+    ray_address = _resolve_ray_address(args.ray_address)
+    if args.generation_backend == "vllm":
+        _validate_vllm_worker_layout(worker_devices=worker_devices, ray_address=ray_address)
+    execution_backend = "ray" if ray_address is not None else "local"
+    ray_nodes: list[RayNodeInfo] = []
+    if ray_address is not None:
+        ray_module = _require_ray()
+        if not ray_module.is_initialized():
+            ray_module.init(address=ray_address)
+        ray_nodes = _discover_ray_nodes(ray_module)
+        if not ray_nodes:
+            raise ValueError("Ray is connected, but no alive Ray nodes were discovered.")
+        worker_assignments = _build_distributed_worker_assignments(
+            num_prompts=len(examples),
+            worker_devices=worker_devices,
+            ray_nodes=ray_nodes,
+        )
+    else:
+        worker_assignments = _build_worker_assignments(
+            num_prompts=len(examples),
+            worker_devices=worker_devices,
+        )
+    multi_worker_enabled = len(worker_assignments) > 1
+
+    actor_prompt_summaries: dict[str, list[dict[str, Any]]] = {}
+    actor_metrics: dict[str, dict[str, Any]] = {}
+    actor_worker_summaries: dict[str, list[dict[str, Any]]] = {}
+
+    response_bank_path = output_dir / "response_bank.jsonl"
+    prompt_summary_path = output_dir / "prompt_summary.jsonl"
+    summary_metrics_path = output_dir / "summary_metrics.json"
+    actor_headroom_path = output_dir / "actor_headroom_accuracy.png"
+    entropy_scatter_path = output_dir / "entropy_vs_oracle_success.png"
+    diversity_scatter_path = output_dir / "diversity_vs_oracle_success.png"
+    outcome_variance_path = output_dir / "outcome_variance_by_actor.png"
+
+    with response_bank_path.open("w", encoding="utf-8") as response_bank_file, prompt_summary_path.open(
+        "w",
+        encoding="utf-8",
+    ) as prompt_summary_file:
+        for actor_spec in actor_specs:
+            actor_worker_dir = worker_root / actor_spec.actor_name
+            if actor_worker_dir.exists():
+                shutil.rmtree(actor_worker_dir)
+            actor_worker_dir.mkdir(parents=True, exist_ok=True)
+
+            eos_token_ids = eos_token_ids_by_actor[actor_spec.actor_name]
+            actor_hf_dir = actor_hf_dirs[actor_spec.actor_name]
+
+            if ray_address is not None:
+                prompt_summaries, worker_summaries = run_ray_multi_worker(
+                    output_dir=actor_worker_dir,
+                    actor_spec=actor_spec,
+                    actor_hf_dir=actor_hf_dir,
+                    examples=examples,
+                    worker_assignments=worker_assignments,
+                    args=args,
+                    eos_token_ids=eos_token_ids,
+                    response_bank_file=response_bank_file,
+                    prompt_summary_file=prompt_summary_file,
+                )
+            elif len(worker_assignments) == 1:
+                progress_bar = tqdm(
+                    total=len(examples),
+                    desc=f"actor_proposal_diagnostic[{actor_spec.actor_name}]",
+                    unit="prompt",
+                    dynamic_ncols=True,
+                )
+                try:
+                    _worker_entry(
+                        actor_spec=actor_spec,
+                        actor_hf_dir=str(actor_hf_dir),
+                        assignment=worker_assignments[0],
+                        examples=examples,
+                        dtype_name=args.dtype,
+                        trust_remote_code=args.trust_remote_code,
+                        max_prompt_length=args.max_prompt_length,
+                        max_new_tokens=args.max_new_tokens,
+                        eos_token_ids=eos_token_ids,
+                        num_samples_per_prompt=args.num_samples_per_prompt,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        top_k=args.top_k,
+                        base_seed=args.seed,
+                        omit_prompt_text=args.omit_prompt_text,
+                        omit_response_token_ids=args.omit_response_token_ids,
+                        store_token_entropies=args.store_token_entropies,
+                        use_actor_cache=not args.disable_actor_cache,
+                        generation_backend=args.generation_backend,
+                        vllm_logprobs_for_entropy=args.vllm_logprobs_for_entropy,
+                        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                        vllm_tensor_parallel_size=args.vllm_tensor_parallel_size,
+                        vllm_max_model_len=args.vllm_max_model_len,
+                        vllm_max_num_seqs=args.vllm_max_num_seqs,
+                        vllm_enforce_eager=args.vllm_enforce_eager,
+                        classifier_aid_config=args.classifier_aid_config,
+                        worker_root=str(actor_worker_dir),
+                        progress_queue=None,
+                    )
+                finally:
+                    progress_bar.update(len(examples))
+                    progress_bar.close()
+                prompt_summaries, worker_summaries = _collect_worker_outputs(
+                    worker_root=actor_worker_dir,
+                    assignments=worker_assignments,
+                    response_bank_file=response_bank_file,
+                    prompt_summary_file=prompt_summary_file,
+                )
+            else:
+                progress_queue, processes = _start_worker_processes(
+                    actor_spec=actor_spec,
+                    actor_hf_dir=actor_hf_dir,
+                    assignments=worker_assignments,
+                    examples=examples,
+                    args=args,
+                    eos_token_ids=eos_token_ids,
+                    worker_root=actor_worker_dir,
+                )
+                worker_progress: dict[int, dict[str, Any]] = {
+                    assignment.worker_id: {"done": 0, "total": assignment.num_prompts}
+                    for assignment in worker_assignments
+                }
+                completed_prompts = 0
+                completed_workers = 0
+                with tqdm(
+                    total=len(examples),
+                    desc=f"actor_proposal_diagnostic[{actor_spec.actor_name}]",
+                    unit="prompt",
+                    dynamic_ncols=True,
+                ) as progress_bar:
+                    progress_bar.set_postfix_str(_progress_postfix(worker_progress))
+                    while True:
+                        alive = any(process.is_alive() for process, _assignment in processes)
+                        try:
+                            event = progress_queue.get(timeout=0.2)
+                        except Empty:
+                            _assert_worker_processes_healthy(processes=processes, worker_root=actor_worker_dir)
+                            if not alive:
+                                break
+                            continue
+                        event_type = event.get("type")
+                        worker_id = int(event.get("worker_id", -1))
+                        if event_type == "worker_started":
+                            worker_progress.setdefault(worker_id, {})
+                            worker_progress[worker_id]["total"] = int(event.get("worker_total_prompts", 0))
+                        elif event_type == "prompt_done":
+                            completed_prompts += 1
+                            worker_progress.setdefault(worker_id, {})
+                            worker_progress[worker_id]["done"] = int(event.get("worker_completed_prompts", 0))
+                            worker_progress[worker_id]["total"] = int(event.get("worker_total_prompts", 0))
+                            progress_bar.update(1)
+                        elif event_type == "worker_done":
+                            completed_workers += 1
+                            worker_progress.setdefault(worker_id, {})
+                            worker_progress[worker_id]["done"] = int(event.get("worker_completed_prompts", 0))
+                            worker_progress[worker_id]["total"] = int(event.get("worker_total_prompts", 0))
+                        elif event_type == "worker_error":
+                            raise RuntimeError(
+                                f"Worker {worker_id} reported an error.\n"
+                                f"{event.get('traceback', 'No traceback provided.')}"
+                            )
+                        progress_bar.set_postfix_str(_progress_postfix(worker_progress))
+                        _assert_worker_processes_healthy(processes=processes, worker_root=actor_worker_dir)
+                        if (
+                            not alive
+                            and completed_prompts >= len(examples)
+                            and completed_workers >= len(worker_assignments)
+                        ):
+                            break
+
+                _join_worker_processes(processes=processes, worker_root=actor_worker_dir)
+                prompt_summaries, worker_summaries = _collect_worker_outputs(
+                    worker_root=actor_worker_dir,
+                    assignments=worker_assignments,
+                    response_bank_file=response_bank_file,
+                    prompt_summary_file=prompt_summary_file,
+                )
+            actor_prompt_summaries[actor_spec.actor_name] = prompt_summaries
+            actor_worker_summaries[actor_spec.actor_name] = worker_summaries
+            actor_metrics[actor_spec.actor_name] = _aggregate_actor_metrics(
+                actor_name=actor_spec.actor_name,
+                actor_checkpoint_dir=actor_spec.checkpoint_dir,
+                prompt_summaries=prompt_summaries,
+                worker_summaries=worker_summaries,
+                num_samples_per_prompt=args.num_samples_per_prompt,
+            )
+
+    pairwise_comparisons: dict[str, dict[str, Any]] = {}
+    paired_bootstrap: dict[str, dict[str, Any]] = {}
+    if len(actor_specs) >= 2:
+        pairwise_comparisons, paired_bootstrap = build_pairwise_comparisons(
+            actor_prompt_summaries=actor_prompt_summaries,
+            actor_names=[actor_spec.actor_name for actor_spec in actor_specs],
+            bootstrap_samples=args.bootstrap_samples,
+            base_seed=args.seed + 50_000,
+            num_samples_per_prompt=args.num_samples_per_prompt,
+        )
+
+    if not args.skip_plots:
+        _plot_actor_headroom(
+            actor_metrics=actor_metrics,
+            actor_names=[actor_spec.actor_name for actor_spec in actor_specs],
+            num_samples_per_prompt=args.num_samples_per_prompt,
+            output_path=actor_headroom_path,
+            dpi=args.plot_dpi,
+        )
+        entropy_available = any(
+            prompt_summary.get("mean_bank_response_entropy") is not None
+            for prompt_summaries in actor_prompt_summaries.values()
+            for prompt_summary in prompt_summaries
+        )
+        if entropy_available:
+            _plot_prompt_scatter(
+                actor_prompt_summaries=actor_prompt_summaries,
+                actor_names=[actor_spec.actor_name for actor_spec in actor_specs],
+                x_field="mean_bank_response_entropy",
+                y_field="oracle_best_of_n_accuracy",
+                xlabel="Mean Bank Response Entropy",
+                ylabel=f"Oracle Best-of-{args.num_samples_per_prompt} Task Score",
+                title="Entropy vs Oracle Success",
+                output_path=entropy_scatter_path,
+                dpi=args.plot_dpi,
+            )
+        _plot_prompt_scatter(
+            actor_prompt_summaries=actor_prompt_summaries,
+            actor_names=[actor_spec.actor_name for actor_spec in actor_specs],
+            x_field="distinct_response_fraction",
+            y_field="oracle_best_of_n_accuracy",
+            xlabel="Distinct Response Fraction",
+            ylabel=f"Oracle Best-of-{args.num_samples_per_prompt} Task Score",
+            title="Diversity vs Oracle Success",
+            output_path=diversity_scatter_path,
+            dpi=args.plot_dpi,
+        )
+        _plot_outcome_variance(
+            actor_metrics=actor_metrics,
+            actor_names=[actor_spec.actor_name for actor_spec in actor_specs],
+            output_path=outcome_variance_path,
+            dpi=args.plot_dpi,
+        )
+
+    _write_output_readme(
+        output_dir=output_dir,
+        args=args,
+        actor_names=[actor_spec.actor_name for actor_spec in actor_specs],
+        actor_metrics=actor_metrics,
+    )
+
+    summary_payload = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "repo_root": str(repo_root),
+        "git_commit": _git_commit(repo_root),
+        "execution_backend": execution_backend,
+        "dataset_path": str(Path(args.dataset_path).resolve()),
+        "output_dir": str(output_dir),
+        "response_bank_path": str(response_bank_path),
+        "prompt_summary_path": str(prompt_summary_path),
+        "summary_metrics_path": str(summary_metrics_path),
+        "actor_headroom_accuracy_path": None if args.skip_plots else str(actor_headroom_path),
+        "entropy_vs_oracle_success_path": (
+            None
+            if args.skip_plots
+            or not any(
+                prompt_summary.get("mean_bank_response_entropy") is not None
+                for prompt_summaries in actor_prompt_summaries.values()
+                for prompt_summary in prompt_summaries
+            )
+            else str(entropy_scatter_path)
+        ),
+        "diversity_vs_oracle_success_path": None if args.skip_plots else str(diversity_scatter_path),
+        "outcome_variance_by_actor_path": None if args.skip_plots else str(outcome_variance_path),
+        "num_prompts": int(len(examples)),
+        "num_samples_per_prompt": int(args.num_samples_per_prompt),
+        "sampling_config": {
+            "temperature": float(args.temperature),
+            "top_p": float(args.top_p),
+            "top_k": int(args.top_k),
+            "max_new_tokens": int(args.max_new_tokens),
+            "max_prompt_length": int(args.max_prompt_length),
+            "generation_backend": args.generation_backend,
+            "vllm_logprobs_for_entropy": bool(args.vllm_logprobs_for_entropy),
+            "vllm_gpu_memory_utilization": float(args.vllm_gpu_memory_utilization),
+            "vllm_tensor_parallel_size": int(args.vllm_tensor_parallel_size),
+            "vllm_max_model_len": None if args.vllm_max_model_len is None else int(args.vllm_max_model_len),
+            "vllm_max_num_seqs": None if args.vllm_max_num_seqs is None else int(args.vllm_max_num_seqs),
+            "vllm_enforce_eager": bool(args.vllm_enforce_eager),
+        },
+        "actors": actor_metrics,
+        "pairwise_comparisons": pairwise_comparisons,
+        "paired_bootstrap": paired_bootstrap,
+        "ray_address": ray_address,
+        "ray_nodes": [asdict(node) for node in ray_nodes],
+        "multi_worker_enabled": multi_worker_enabled,
+        "worker_devices": worker_devices,
+        "worker_assignments": [asdict(assignment) for assignment in worker_assignments],
+        "worker_summaries": actor_worker_summaries,
+        "tokenizer_fingerprints": tokenizer_fingerprints,
+        "eos_token_ids_by_actor": {
+            actor_name: list(token_ids) for actor_name, token_ids in eos_token_ids_by_actor.items()
+        },
+        "run_args": {key: _json_safe(value) for key, value in vars(args).items()},
+    }
+    with summary_metrics_path.open("w", encoding="utf-8") as summary_file:
+        json.dump(summary_payload, summary_file, ensure_ascii=True, indent=2)
+
+    return 0
+
+
+_make_main_module_importable()
+
+if __name__ == "__main__":
+    raise SystemExit(main())
