@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 WORK_DIR="${WORK_DIR:-${REPO_ROOT}/verl}"
-IS_SLURM_JOB=0
+IS_SLURM_JOB=1
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   IS_SLURM_JOB=1
 fi
