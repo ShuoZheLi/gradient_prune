@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=sft_qwen3_1d7b_5x7500
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh
+#SBATCH --partition=gh-dev
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=03:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=sft_qwen3_1d7b_5x7500-%j.out
 #SBATCH --error=sft_qwen3_1d7b_5x7500-%j.err
 
