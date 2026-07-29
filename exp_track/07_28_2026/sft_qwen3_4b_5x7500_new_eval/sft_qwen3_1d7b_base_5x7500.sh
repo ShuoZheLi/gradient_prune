@@ -124,7 +124,7 @@ generation_dtype=${generation_dtype:-null}
 
 generation_backend=${generation_backend:-vllm}
 generation_eval_mode=${generation_eval_mode:-in_process}
-generation_vllm_gpu_memory_utilization=${generation_vllm_gpu_memory_utilization:-0.4}
+generation_vllm_gpu_memory_utilization=${generation_vllm_gpu_memory_utilization:-0.9}
 generation_vllm_host_ip=${generation_vllm_host_ip:-127.0.0.1}
 generation_vllm_enforce_eager=${generation_vllm_enforce_eager:-True}
 generation_vllm_max_model_len=${generation_vllm_max_model_len:-null}
