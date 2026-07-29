@@ -107,14 +107,14 @@ sparse_verify_frozen_weights=${sparse_verify_frozen_weights:-true}
 sparse_verification_interval=${sparse_verification_interval:-10}
 
 # eval_method: loss, generation_reward, or both.
-eval_method=${eval_method:-generation_reward}
-eval_before_train=${eval_before_train:-False}
+eval_method=${eval_method:-loss}
+eval_before_train=${eval_before_train:-True}
 eval_freq=${eval_freq:--1}
-loss_eval_freq=${loss_eval_freq:--1}
+loss_eval_freq=${loss_eval_freq:-50}
 generation_eval_freq=${generation_eval_freq:--1}
 
-# loss_eval_files must be SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
-loss_eval_files=${loss_eval_files:-__TRAIN_FILE__}
+# Raw prompt/response loss eval files are converted to SFT messages format below.
+loss_eval_files=${loss_eval_files:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}
 if [[ -z "${generation_eval_files+x}" ]]; then
   generation_eval_files="${MATH_500_EVAL_FILE} ${AIME_24_25_26_EVAL_FILE}"
   generation_eval_names=${generation_eval_names:-"math_500 aime_24_25_26"}
@@ -432,27 +432,85 @@ SFT_RESPONSE_FILTER_CORRECT="${SFT_RESPONSE_FILTER_CORRECT:-true}"
 SFT_ENABLE_THINKING_COLUMN="${SFT_ENABLE_THINKING_COLUMN:-}"
 SFT_REUSE_PREPARED_DATA="${SFT_REUSE_PREPARED_DATA:-false}"
 
+LOSS_SFT_MAX_SAMPLES="${LOSS_SFT_MAX_SAMPLES:--1}"
+LOSS_SFT_DEDUP_BY_PROMPT="${LOSS_SFT_DEDUP_BY_PROMPT:-false}"
+LOSS_SFT_RESPONSE_FILTER_CORRECT="${LOSS_SFT_RESPONSE_FILTER_CORRECT:-true}"
+LOSS_SFT_ENABLE_THINKING_COLUMN="${LOSS_SFT_ENABLE_THINKING_COLUMN:-}"
+LOSS_SFT_REUSE_PREPARED_DATA="${LOSS_SFT_REUSE_PREPARED_DATA:-${SFT_REUSE_PREPARED_DATA}}"
+
 prepare_sft_data() {
   local input_path="$1"
   local output_path="$2"
+  local max_samples="$3"
+  local dedup_by_prompt="$4"
+  local filter_correct="$5"
+  local enable_thinking="$6"
   local converter="$WORK_DIR/tools/prepare_sft_messages_data.py"
   local converter_args=(
     --input "$input_path"
     --output "$output_path"
-    --max-samples "$SFT_MAX_SAMPLES"
+    --max-samples "$max_samples"
   )
 
-  if [[ "$SFT_DEDUP_BY_PROMPT" == "true" ]]; then
+  if [[ "$dedup_by_prompt" == "true" ]]; then
     converter_args+=(--dedup-by-prompt)
   fi
-  if [[ "$SFT_RESPONSE_FILTER_CORRECT" != "true" ]]; then
+  if [[ "$filter_correct" != "true" ]]; then
     converter_args+=(--no-filter-correct)
   fi
-  if [[ -n "$SFT_ENABLE_THINKING_COLUMN" ]]; then
-    converter_args+=(--enable-thinking "$SFT_ENABLE_THINKING_COLUMN")
+  if [[ -n "$enable_thinking" ]]; then
+    converter_args+=(--enable-thinking "$enable_thinking")
   fi
 
   python3 "$converter" "${converter_args[@]}"
+}
+
+prepare_loss_eval_files() {
+  local raw_loss_eval_files="$1"
+  local prepared_paths=()
+  local eval_index=0
+
+  mkdir -p "$SFT_PREPARED_DATA_DIR"
+
+  while IFS= read -r eval_path; do
+    if [[ -z "$eval_path" || "$eval_path" == "null" ]]; then
+      continue
+    fi
+
+    case "${eval_path##*.}" in
+      jsonl|parquet|pq)
+        local eval_basename
+        eval_basename="$(basename "$eval_path")"
+        eval_basename="${eval_basename%.*}"
+        local prepared_eval_path="${SFT_PREPARED_DATA_DIR}/loss_eval_${eval_index}_${eval_basename}_sft_messages.parquet"
+
+        if [[ "$LOSS_SFT_REUSE_PREPARED_DATA" == "true" && -f "$prepared_eval_path" ]]; then
+          echo "Reusing prepared loss eval SFT messages dataset: $prepared_eval_path" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
+        else
+          echo "Preparing loss eval SFT messages dataset from: $eval_path" >&2
+          prepare_sft_data \
+            "$eval_path" \
+            "$prepared_eval_path" \
+            "$LOSS_SFT_MAX_SAMPLES" \
+            "$LOSS_SFT_DEDUP_BY_PROMPT" \
+            "$LOSS_SFT_RESPONSE_FILTER_CORRECT" \
+            "$LOSS_SFT_ENABLE_THINKING_COLUMN" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
+        fi
+        prepared_paths+=("$prepared_eval_path")
+        ;;
+      *)
+        echo "Unsupported loss_eval_files extension for SFT preparation: $eval_path" >&2
+        exit 1
+        ;;
+    esac
+    eval_index=$((eval_index + 1))
+  done < <(list_eval_paths "$raw_loss_eval_files")
+
+  if [[ ${#prepared_paths[@]} -eq 0 ]]; then
+    echo "null"
+  else
+    normalize_hydra_list_if_many "${prepared_paths[*]}"
+  fi
 }
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -465,7 +523,13 @@ else
         echo "Reusing prepared SFT messages dataset: $SFT_TRAIN_FILE" | tee "$LOG_DIR/prepare_sft_data.log"
       else
         echo "Preparing SFT messages dataset from: $TRAIN_FILE"
-        prepare_sft_data "$TRAIN_FILE" "$SFT_TRAIN_FILE" | tee "$LOG_DIR/prepare_sft_data.log"
+        prepare_sft_data \
+          "$TRAIN_FILE" \
+          "$SFT_TRAIN_FILE" \
+          "$SFT_MAX_SAMPLES" \
+          "$SFT_DEDUP_BY_PROMPT" \
+          "$SFT_RESPONSE_FILTER_CORRECT" \
+          "$SFT_ENABLE_THINKING_COLUMN" | tee "$LOG_DIR/prepare_sft_data.log"
       fi
       TRAIN_FILE="$SFT_TRAIN_FILE"
       ;;
@@ -477,6 +541,8 @@ else
 fi
 if [[ "$loss_eval_files" == "__TRAIN_FILE__" || "$loss_eval_files" == "$RAW_TRAIN_FILE" ]]; then
   loss_eval_files="$TRAIN_FILE"
+elif [[ "$loss_eval_files" != "null" && -n "$loss_eval_files" ]]; then
+  loss_eval_files="$(prepare_loss_eval_files "$loss_eval_files")"
 fi
 generation_eval_files="$(normalize_hydra_list_if_many "$generation_eval_files")"
 if [[ -n "$generation_eval_names" ]]; then
@@ -521,6 +587,11 @@ echo "generation_eval_enable_thinking: $generation_eval_enable_thinking"
 
 ls -ld "$WORK_DIR"
 ls -lh "$TRAIN_FILE"
+while IFS= read -r eval_path; do
+  if [[ "$eval_path" != "null" && -n "$eval_path" ]]; then
+    ls -lh "$eval_path"
+  fi
+done < <(list_eval_paths "$loss_eval_files")
 while IFS= read -r eval_path; do
   if [[ "$eval_path" != "null" && -n "$eval_path" ]]; then
     ls -lh "$eval_path"
@@ -586,7 +657,6 @@ TRAINER_ARGS=(
   sparse_update.mask_optimizer_state=true
   sparse_update.verify_frozen_weights="$sparse_verify_frozen_weights"
   sparse_update.verification_interval="$sparse_verification_interval"
-  sparse_update.strict_load=true
 )
 
 if [[ -n "$generation_eval_names" ]]; then
