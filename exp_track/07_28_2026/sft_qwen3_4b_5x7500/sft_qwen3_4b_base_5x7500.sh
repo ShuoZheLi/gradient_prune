@@ -12,51 +12,14 @@
 set -euo pipefail
 
 # -----------------------------
-# Repository and environment setup
+# Environment setup
 # -----------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-WORK_DIR="${WORK_DIR:-${REPO_ROOT}/verl}"
-IS_SLURM_JOB=0
-if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-  IS_SLURM_JOB=1
-fi
+module reset
+module load nvidia/25.9
 
-if [[ "$IS_SLURM_JOB" == "1" ]]; then
-  SCRATCH="/scratch/09576/shuozhe"
-  unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR SCRATCH_ROOT XDG_CACHE_HOME
-  TMPDIR="${SCRATCH}/tmp"
-  mkdir -p "$TMPDIR"
-  export SCRATCH TMPDIR
-fi
+VENV="${VENV:-/work/09576/shuozhe/verl_setup_tacc/.venv}"
+source "${VENV}/bin/activate"
 
-if [[ "$IS_SLURM_JOB" == "1" ]]; then
-  module reset
-  module load nvidia/25.9
-
-  VENV="${VENV:-/work/09576/shuozhe/verl_setup_tacc/.venv}"
-  set +u
-  source "${VENV}/bin/activate"
-  set -u
-else
-  # For local testing, either activate the environment before running this script or let it
-  # activate LOCAL_CONDA_ENV from LOCAL_CONDA_SH when no Python environment is active.
-  LOCAL_CONDA_SH="${LOCAL_CONDA_SH:-/data/shuozhe/miniconda3/etc/profile.d/conda.sh}"
-  LOCAL_CONDA_ENV="${LOCAL_CONDA_ENV:-verl}"
-  if [[ -z "${CONDA_PREFIX:-}" && -f "$LOCAL_CONDA_SH" ]]; then
-    set +u
-    source "$LOCAL_CONDA_SH"
-    conda activate "$LOCAL_CONDA_ENV"
-    set -u
-  fi
-  VENV="${VENV:-}"
-fi
-
-if [[ "$IS_SLURM_JOB" == "1" ]]; then
-  unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR SCRATCH_ROOT XDG_CACHE_HOME
-else
-  SCRATCH="${SCRATCH:-/tmp/${USER:-verl_user}}"
-fi
 UV_CACHE_DIR="${UV_CACHE_DIR:-${SCRATCH}/.cache/uv}"
 HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${SCRATCH}/data/embeddings}"
@@ -83,16 +46,18 @@ python3 -V
 # -----------------------------
 # Run identity and paths
 # -----------------------------
-export WANDB_PROJECT="${WANDB_PROJECT:-prune_for_post_train}"
+export WANDB_PROJECT="prune_for_post_train"
+WANDB_PROJECT="prune_for_post_train"
 RUN_NAME="${RUN_NAME:-sft_qwen3_4b_base_5x7500}"
-REAL_JOB_ID="${SLURM_JOB_ID:-manual_$(date +%Y%m%d_%H%M%S)}"
-RUN_ID="${RUN_NAME}_${REAL_JOB_ID}"
+REAL_SLURM_JOB_ID="${SLURM_JOB_ID:-manual}"
+RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
 HF_DATASETS_CACHE_ROOT="${HF_DATASETS_CACHE:-}"
 HF_MODULES_CACHE_ROOT="${HF_MODULES_CACHE:-}"
 export HF_DATASETS_CACHE_ROOT
 export HF_MODULES_CACHE_ROOT
 
+WORK_DIR="${WORK_DIR:-/work/09576/shuozhe/gradient_prune/verl}"
 MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/work/09576/shuozhe/saved_model/Qwen3-4B-Base}"
 TRAIN_FILE="${TRAIN_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
 VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
@@ -100,10 +65,10 @@ VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH}/verl_runs}"
-RUN_DIR="${RUN_DIR:-${SCRATCH_ROOT}/${RUN_ID}}"
+RUN_DIR="${SCRATCH_ROOT}/${RUN_ID}"
 LOG_DIR="${RUN_DIR}/logs"
 TRAIN_LOG_DIR="${RUN_DIR}/train_log"
-ARCHIVE_ROOT="${ARCHIVE_ROOT:-${REPO_ROOT}/verl/train_log_archive}"
+ARCHIVE_ROOT="${ARCHIVE_ROOT:-/work/09576/shuozhe/gradient_prune/verl/train_log_archive}"
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 TRAIN_STDOUT_LOG="${TRAIN_LOG_DIR}/job_${RUN_ID}.txt"
 
@@ -158,43 +123,37 @@ generation_vllm_sync_weights=${generation_vllm_sync_weights:-True}
 generation_vllm_enable_multiprocessing=${generation_vllm_enable_multiprocessing:-False}
 
 # -----------------------------
-# Launch config
+# Multi-node torchrun config
 # -----------------------------
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
+NNODES="${SLURM_JOB_NUM_NODES}"
 RDZV_PORT="${RDZV_PORT:-29500}"
 
-if [[ "$IS_SLURM_JOB" == "1" ]]; then
-  NNODES="${NNODES:-${SLURM_JOB_NUM_NODES}}"
-  nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
-  nodes_array=($nodes)
-  head_node="${nodes_array[0]}"
-  head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=($nodes)
+head_node="${nodes_array[0]}"
+head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
 
-  resolved_head_node_ip=""
+resolved_head_node_ip=""
+for candidate_ip in $head_node_ip; do
+  if [[ "$candidate_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    resolved_head_node_ip="$candidate_ip"
+    break
+  fi
+done
+if [[ -z "$resolved_head_node_ip" ]]; then
   for candidate_ip in $head_node_ip; do
-    if [[ "$candidate_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-      resolved_head_node_ip="$candidate_ip"
-      break
-    fi
+    resolved_head_node_ip="$candidate_ip"
+    break
   done
-  if [[ -z "$resolved_head_node_ip" ]]; then
-    for candidate_ip in $head_node_ip; do
-      resolved_head_node_ip="$candidate_ip"
-      break
-    done
-  fi
-  if [[ -z "$resolved_head_node_ip" ]]; then
-    echo "Failed to resolve a usable IP address for torchrun head node $head_node." >&2
-    exit 1
-  fi
-  MASTER_ADDR="$resolved_head_node_ip"
-  MASTER_PORT="$RDZV_PORT"
-  RDZV_ENDPOINT="${MASTER_ADDR}:${MASTER_PORT}"
-else
-  NNODES="${NNODES:-1}"
-  head_node="localhost"
-  RDZV_ENDPOINT="127.0.0.1:${RDZV_PORT}"
 fi
+if [[ -z "$resolved_head_node_ip" ]]; then
+  echo "Failed to resolve a usable IP address for torchrun head node $head_node." >&2
+  exit 1
+fi
+MASTER_ADDR="$resolved_head_node_ip"
+MASTER_PORT="$RDZV_PORT"
+RDZV_ENDPOINT="${MASTER_ADDR}:${MASTER_PORT}"
 
 # -----------------------------
 # Helpers
@@ -318,7 +277,7 @@ fi
 # -----------------------------
 echo "Job ID: ${SLURM_JOB_ID:-manual}"
 echo "Run ID: ${RUN_ID}"
-echo "Slurm mode: ${IS_SLURM_JOB}"
+echo "SLURM nodes: ${SLURM_JOB_NODELIST}"
 echo "Head node: ${head_node}"
 echo "Rendezvous endpoint: ${RDZV_ENDPOINT}"
 echo "GPUS_PER_NODE: ${GPUS_PER_NODE}"
@@ -327,7 +286,6 @@ echo "SCRATCH: ${SCRATCH}"
 echo "RUN_DIR: ${RUN_DIR}"
 echo "LOG_DIR: ${LOG_DIR}"
 echo "TRAIN_LOG_DIR: ${TRAIN_LOG_DIR}"
-describe_path "REPO_ROOT" "$REPO_ROOT"
 describe_path "WORK_DIR" "$WORK_DIR"
 describe_path "MODEL_INIT_CKPT" "$MODEL_INIT_CKPT"
 describe_path "MODEL_PATH" "$MODEL_PATH"
@@ -402,53 +360,35 @@ TRAINER_ARGS=(
 # -----------------------------
 # Run SFT training
 # -----------------------------
-if [[ "$IS_SLURM_JOB" == "1" ]]; then
-  # One Slurm task launches one torchrun agent per node. torchrun then launches GPUS_PER_NODE
-  # local trainer processes on that node. SLURM_PROCID is the node_rank because ntasks-per-node=1.
-  srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
-    bash -c '
-      set -euo pipefail
-      export SCRATCH="'"${SCRATCH}"'"
-      export TMPDIR="'"${SCRATCH}"'/tmp"
-      unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR XDG_CACHE_HOME
-      export UV_CACHE_DIR="'"${UV_CACHE_DIR}"'"
-      export HF_HOME="'"${HF_HOME}"'"
-      node_cache_root="'"${SCRATCH}"'/verl_'"${RUN_ID}"'_node_${SLURM_PROCID}"
-      export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_ROOT:-${node_cache_root}/huggingface_datasets}"
-      export HF_MODULES_CACHE="${HF_MODULES_CACHE_ROOT:-${node_cache_root}/huggingface_modules}"
-      export TIKTOKEN_ENCODINGS_BASE="'"${TIKTOKEN_ENCODINGS_BASE}"'"
-      export TORCH_EXTENSIONS_DIR="'"${TORCH_EXTENSIONS_DIR}"'/node_${SLURM_PROCID}"
-      mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
+# One Slurm task launches one torchrun agent per node. torchrun then launches GPUS_PER_NODE
+# local trainer processes on that node. SLURM_PROCID is the node_rank because ntasks-per-node=1.
+srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
+  bash -c '
+    set -euo pipefail
+    source "'"${VENV}"'/bin/activate"
+    cd "'"${WORK_DIR}"'"
+    export PYTHONPATH="'"${WORK_DIR}"'${PYTHONPATH:+:${PYTHONPATH}}"
+    export UV_CACHE_DIR="'"${UV_CACHE_DIR}"'"
+    export HF_HOME="'"${HF_HOME}"'"
+    node_cache_root="${TMPDIR:-/tmp}/verl_'"${RUN_ID}"'_node_${SLURM_PROCID}"
+    export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_ROOT:-${node_cache_root}/huggingface_datasets}"
+    export HF_MODULES_CACHE="${HF_MODULES_CACHE_ROOT:-${node_cache_root}/huggingface_modules}"
+    export TIKTOKEN_ENCODINGS_BASE="'"${TIKTOKEN_ENCODINGS_BASE}"'"
+    export TORCH_EXTENSIONS_DIR="'"${TORCH_EXTENSIONS_DIR}"'/node_${SLURM_PROCID}"
+    mkdir -p "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TORCH_EXTENSIONS_DIR"
+    export PYTHONUNBUFFERED=1
+    export TOKENIZERS_PARALLELISM=true
+    export HYDRA_FULL_ERROR="'"${HYDRA_FULL_ERROR}"'"
+    export NCCL_DEBUG="'"${NCCL_DEBUG}"'"
+    export WANDB_PROJECT="'"${WANDB_PROJECT}"'"
 
-      if [[ -n "'"${VENV}"'" ]]; then
-        set +u
-        source "'"${VENV}"'/bin/activate"
-        set -u
-      fi
-      cd "'"${WORK_DIR}"'"
-      export PYTHONPATH="'"${WORK_DIR}"'${PYTHONPATH:+:${PYTHONPATH}}"
-      export PYTHONUNBUFFERED=1
-      export TOKENIZERS_PARALLELISM=true
-      export HYDRA_FULL_ERROR="'"${HYDRA_FULL_ERROR}"'"
-      export NCCL_DEBUG="'"${NCCL_DEBUG}"'"
-      export WANDB_PROJECT="'"${WANDB_PROJECT}"'"
-
-      torchrun \
-        --nnodes="'"${NNODES}"'" \
-        --nproc_per_node="'"${GPUS_PER_NODE}"'" \
-        --node_rank="${SLURM_PROCID}" \
-        --rdzv_id="'"${RUN_ID}"'" \
-        --rdzv_backend=c10d \
-        --rdzv_endpoint="'"${RDZV_ENDPOINT}"'" \
-        -m verl.trainer.sft_trainer \
-        "$@"
-    ' _ "${TRAINER_ARGS[@]}" "$@" 2>&1 | tee "$TRAIN_STDOUT_LOG"
-else
-  torchrun \
-    --standalone \
-    --nnodes=1 \
-    --nproc_per_node="$GPUS_PER_NODE" \
-    -m verl.trainer.sft_trainer \
-    "${TRAINER_ARGS[@]}" \
-    "$@" 2>&1 | tee "$TRAIN_STDOUT_LOG"
-fi
+    torchrun \
+      --nnodes="'"${NNODES}"'" \
+      --nproc_per_node="'"${GPUS_PER_NODE}"'" \
+      --node_rank="${SLURM_PROCID}" \
+      --rdzv_id="'"${RUN_ID}"'" \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="'"${RDZV_ENDPOINT}"'" \
+      -m verl.trainer.sft_trainer \
+      "$@"
+  ' _ "${TRAINER_ARGS[@]}" "$@" 2>&1 | tee "$TRAIN_STDOUT_LOG"
