@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=sft_qwen3_4b_5x7500
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh-dev
+#SBATCH --partition=gh
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --output=sft_qwen3_4b_5x7500-%j.out
 #SBATCH --error=sft_qwen3_4b_5x7500-%j.err
 
@@ -89,8 +89,8 @@ save_freq=${save_freq:-50}
 num_workers=${num_workers:-8}
 
 # eval_method: loss, generation_reward, or both.
-eval_method=${eval_method:-loss}
-eval_before_train=${eval_before_train:-False}
+eval_method=${eval_method:-generation_reward}
+eval_before_train=${eval_before_train:-True}
 eval_freq=${eval_freq:--1}
 loss_eval_freq=${loss_eval_freq:-50}
 generation_eval_freq=${generation_eval_freq:-50}

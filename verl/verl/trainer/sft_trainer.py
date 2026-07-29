@@ -509,6 +509,8 @@ class SFTTrainer:
                     ).item()
                     total_tokens += metrics["train/global_tokens"]
                     metrics["train/total_tokens(B)"] = total_tokens / 1e9
+                    metrics["train/steps_per_epoch"] = self.steps_per_epoch
+                    metrics["train/epoch_progress"] = epoch + (step_in_epoch + 1) / self.steps_per_epoch
 
                     if self.engine.get_data_parallel_rank() == 0:
                         tracking.log(data=metrics, step=global_step)
