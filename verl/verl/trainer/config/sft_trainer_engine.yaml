@@ -154,6 +154,7 @@ trainer:
   eval_method: loss
   val_before_train: False
   generation_eval:
+    mode: in_process
     backend: hf
     max_new_tokens: 2048
     do_sample: False
@@ -166,8 +167,17 @@ trainer:
     vllm_gpu_memory_utilization: 0.2
     vllm_host_ip: 127.0.0.1
     vllm_enforce_eager: True
+    vllm_max_model_len: null
     vllm_sync_weights: True
     vllm_enable_multiprocessing: False
+    offline_output_dir: null
+    offline_python: null
+    offline_launch_command: null
+    offline_wait: True
+    offline_keep_export: True
+    offline_device: cuda
+    offline_cuda_visible_devices: null
+    offline_export_dtype: bfloat16
     reward_kwargs: {}
 
   # Resume mode: "auto", "disable", or "resume_path"

@@ -1,4 +1,5 @@
 from collections import defaultdict
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -130,6 +131,20 @@ def test_should_validate_method_uses_per_method_frequency_overrides():
     assert trainer._should_validate_method("generation_reward", global_step=5, is_last_step=True)
 
 
+def test_should_validate_method_allows_offline_generation_eval_without_dataloader():
+    trainer = SFTTrainer.__new__(SFTTrainer)
+    trainer.val_dataloader = None
+    trainer.generation_val_dataloader = None
+    trainer.eval_methods = ("generation_reward",)
+    trainer.generation_eval_mode = "offline_vllm"
+    trainer.generation_eval_specs = [{"name": "math_500", "files": ["/data/math/test.parquet"]}]
+    trainer.test_freq = 10
+    trainer.generation_reward_test_freq = 3
+
+    assert not trainer._should_validate_method("generation_reward", global_step=4, is_last_step=False)
+    assert trainer._should_validate_method("generation_reward", global_step=6, is_last_step=False)
+
+
 def test_generation_autocast_dtype_prefers_config_then_model_dtype():
     import torch
 
@@ -188,6 +203,48 @@ def test_available_eval_methods_respects_selected_methods_and_dataloaders():
 
     trainer.generation_val_dataloader = object()
     assert trainer._available_eval_methods() == ["loss", "generation_reward"]
+
+
+def test_available_eval_methods_accepts_offline_generation_eval_specs():
+    trainer = SFTTrainer.__new__(SFTTrainer)
+    trainer.eval_methods = ("generation_reward",)
+    trainer.generation_val_dataloader = None
+    trainer.generation_eval_mode = "offline_vllm"
+    trainer.generation_eval_specs = [{"name": "math_500", "files": ["/data/math/test.parquet"]}]
+
+    assert trainer._available_eval_methods() == ["generation_reward"]
+
+
+def test_offline_generation_eval_env_removes_torchrun_variables(monkeypatch):
+    trainer = SFTTrainer.__new__(SFTTrainer)
+    trainer.config = SimpleNamespace(
+        trainer=SimpleNamespace(generation_eval=DictLike(offline_cuda_visible_devices="2"))
+    )
+    for key in [
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "WORLD_SIZE",
+        "RANK",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "GROUP_RANK",
+        "GROUP_WORLD_SIZE",
+        "ROLE_RANK",
+        "ROLE_NAME",
+        "ROLE_WORLD_SIZE",
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_ERROR_FILE",
+    ]:
+        monkeypatch.setenv(key, "leaked")
+
+    env = trainer._offline_generation_eval_env()
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "2"
+    assert "MASTER_ADDR" not in env
+    assert "LOCAL_WORLD_SIZE" not in env
+    assert "GROUP_WORLD_SIZE" not in env
+    assert "ROLE_WORLD_SIZE" not in env
+    assert all(not key.startswith("TORCHELASTIC_") for key in env)
 
 
 def test_vllm_sampling_params_uses_single_output_per_repeated_prompt():

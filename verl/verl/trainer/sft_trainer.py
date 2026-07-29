@@ -25,8 +25,13 @@ from tensordict.tensorclass import NonTensorData
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+import json
 import logging
 import re
+import shlex
+import shutil
+import subprocess
+import sys
 import warnings
 
 import hydra
@@ -188,8 +193,12 @@ class SFTTrainer:
     def _should_validate_method(self, method, global_step, is_last_step):
         if method == "loss" and self.val_dataloader is None:
             return False
-        if method == "generation_reward" and self.generation_val_dataloader is None:
-            return False
+        if method == "generation_reward":
+            if hasattr(self, "_has_validation_dataloader"):
+                if not self._has_validation_dataloader("generation_reward"):
+                    return False
+            elif getattr(self, "generation_val_dataloader", None) is None:
+                return False
         frequency = self._get_eval_frequency(method)
         return is_last_step or (frequency is not None and frequency > 0 and global_step % frequency == 0)
 
@@ -219,7 +228,9 @@ class SFTTrainer:
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
         self.generation_val_dataset = None
         self.generation_val_datasets = {}
+        self.generation_eval_specs = []
         self.generation_eval_prefix_metrics = False
+        self.generation_eval_mode = config.trainer.generation_eval.get("mode", "in_process")
 
         generation_val_files = config.data.get("generation_eval_files", None) or config.data.val_files
         if "generation_reward" in self.eval_methods:
@@ -232,9 +243,12 @@ class SFTTrainer:
                 generation_val_files,
                 config.data.get("generation_eval_names", None),
             )
+            self.generation_eval_specs = generation_eval_specs
             self.generation_eval_prefix_metrics = (
                 len(generation_eval_specs) > 1 or any(spec["explicit_name"] for spec in generation_eval_specs)
             )
+            if self.generation_eval_mode in {"offline_vllm", "offline_subprocess"}:
+                return
             for spec in generation_eval_specs:
                 self.generation_val_datasets[spec["name"]] = create_generation_eval_dataset(
                     spec["files"],
@@ -376,6 +390,9 @@ class SFTTrainer:
         return metric
 
     def _compute_generation_reward_validation_metrics(self, global_step=None):
+        if self.generation_eval_mode in {"offline_vllm", "offline_subprocess"}:
+            return self._compute_offline_generation_reward_validation_metrics(global_step=global_step)
+
         dp_group = self.engine.get_data_parallel_group()
         combined_metric = {}
         for eval_name, dataloader in self.generation_val_dataloaders.items():
@@ -412,8 +429,185 @@ class SFTTrainer:
         if method == "loss":
             return self.val_dataloader is not None
         if method == "generation_reward":
-            return bool(getattr(self, "generation_val_dataloaders", None) or self.generation_val_dataloader is not None)
+            return bool(
+                getattr(self, "generation_val_dataloaders", None)
+                or self.generation_val_dataloader is not None
+                or (
+                    getattr(self, "generation_eval_mode", "in_process") in {"offline_vllm", "offline_subprocess"}
+                    and getattr(self, "generation_eval_specs", None)
+                )
+            )
         raise ValueError(f"Unsupported eval method {method!r}")
+
+    def _offline_generation_eval_root(self):
+        configured_root = self.config.trainer.generation_eval.get("offline_output_dir", None)
+        if configured_root and str(configured_root).strip().lower() not in {"", "none", "null"}:
+            return configured_root
+        return os.path.join(self.config.trainer.default_local_dir, "offline_generation_eval")
+
+    def _get_generation_eval_optional_string(self, key, default=None):
+        value = self.config.trainer.generation_eval.get(key, default)
+        if value is None:
+            return default
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+            return default
+        return value
+
+    def _offline_generation_eval_env(self):
+        env = os.environ.copy()
+        distributed_env_keys = [
+            "MASTER_ADDR",
+            "MASTER_PORT",
+            "WORLD_SIZE",
+            "RANK",
+            "LOCAL_RANK",
+            "LOCAL_WORLD_SIZE",
+            "GROUP_RANK",
+            "GROUP_WORLD_SIZE",
+            "ROLE_RANK",
+            "ROLE_NAME",
+            "ROLE_WORLD_SIZE",
+            "TORCHELASTIC_RUN_ID",
+        ]
+        for key in distributed_env_keys:
+            env.pop(key, None)
+        for key in list(env):
+            if key.startswith("TORCHELASTIC_"):
+                env.pop(key, None)
+        cuda_visible_devices = self._get_generation_eval_optional_string("offline_cuda_visible_devices", None)
+        if cuda_visible_devices is not None:
+            env["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
+        return env
+
+    def _compute_offline_generation_reward_validation_metrics(self, global_step=None):
+        step = 0 if global_step is None else int(global_step)
+        root_dir = self._offline_generation_eval_root()
+        eval_dir = os.path.join(root_dir, f"global_step_{step}")
+        export_dir = os.path.join(eval_dir, "hf_model")
+        output_dir = os.path.join(eval_dir, "eval_output")
+        manifest_path = os.path.join(eval_dir, "manifest.json")
+        metrics_path = os.path.join(output_dir, "metrics.json")
+
+        export_hf_model_for_offline_generation_eval(
+            model=self.engine.module,
+            processing_class=self.model_config.tokenizer,
+            export_dir=export_dir,
+            trust_remote_code=bool(getattr(self.model_config, "trust_remote_code", False)),
+            export_dtype=self.config.trainer.generation_eval.get("offline_export_dtype", "bfloat16"),
+        )
+
+        is_eval_launcher = self.engine.get_data_parallel_rank() == 0 and self.engine.is_mp_src_rank_with_outputs()
+        if not is_eval_launcher:
+            error_payload = [None]
+            if torch.distributed.is_initialized():
+                torch.distributed.broadcast_object_list(error_payload, src=0)
+            if error_payload[0] is not None:
+                raise RuntimeError(error_payload[0])
+            return None
+
+        os.makedirs(output_dir, exist_ok=True)
+        generation_config = OmegaConf.to_container(self.config.trainer.generation_eval, resolve=True)
+        generation_config["backend"] = "vllm"
+        generation_config["vllm_sync_weights"] = False
+        generation_config["vllm_model_path"] = export_dir
+        generation_config["vllm_tokenizer_path"] = export_dir
+        data_config = OmegaConf.to_container(self.config.data, resolve=True)
+        manifest = {
+            "global_step": step,
+            "model_path": export_dir,
+            "eval_specs": [
+                {"name": spec["name"], "files": spec["files"]} for spec in self.generation_eval_specs
+            ],
+            "prefix_metrics": self.generation_eval_prefix_metrics,
+            "data_config": data_config,
+            "generation_config": generation_config,
+            "max_samples": self.config.data.get("val_max_samples", -1),
+            "batch_size": self.config.data.get("generation_eval_batch_size", self.train_batch_size_per_dp),
+            "num_workers": self.config.data.get("num_workers", 0),
+            "device": self.config.trainer.generation_eval.get("offline_device", "cuda"),
+            "output_dir": output_dir,
+            "metrics_path": metrics_path,
+        }
+        atomic_write_json(manifest_path, manifest)
+
+        metric = None
+        error_message = None
+        try:
+            wait_for_metrics = get_generation_config_bool(self.config.trainer.generation_eval, "offline_wait", True)
+            launch_command = self._get_generation_eval_optional_string("offline_launch_command", None)
+            if launch_command:
+                command = launch_command.format(
+                    manifest=shlex.quote(manifest_path),
+                    output_dir=shlex.quote(output_dir),
+                    metrics_path=shlex.quote(metrics_path),
+                    step=step,
+                )
+                if wait_for_metrics:
+                    subprocess.run(
+                        command,
+                        shell=True,
+                        check=True,
+                        env=self._offline_generation_eval_env(),
+                        close_fds=True,
+                        start_new_session=True,
+                    )
+                else:
+                    subprocess.Popen(
+                        command,
+                        shell=True,
+                        env=self._offline_generation_eval_env(),
+                        close_fds=True,
+                        start_new_session=True,
+                    )
+                    metric = {
+                        "val-aux/offline_generation_eval/launched": 1,
+                        "val-aux/offline_generation_eval/step": step,
+                    }
+            else:
+                command = [
+                    self._get_generation_eval_optional_string("offline_python", sys.executable),
+                    "-m",
+                    "verl.trainer.sft_offline_generation_eval",
+                    "--manifest",
+                    manifest_path,
+                ]
+                if wait_for_metrics:
+                    subprocess.run(
+                        command,
+                        check=True,
+                        env=self._offline_generation_eval_env(),
+                        close_fds=True,
+                        start_new_session=True,
+                    )
+                else:
+                    subprocess.Popen(
+                        command,
+                        env=self._offline_generation_eval_env(),
+                        close_fds=True,
+                        start_new_session=True,
+                    )
+                    metric = {
+                        "val-aux/offline_generation_eval/launched": 1,
+                        "val-aux/offline_generation_eval/step": step,
+                    }
+
+            if wait_for_metrics:
+                if not os.path.exists(metrics_path):
+                    raise FileNotFoundError(f"Offline generation eval did not write metrics: {metrics_path}")
+                with open(metrics_path) as file:
+                    metric = json.load(file)
+
+            if not get_generation_config_bool(self.config.trainer.generation_eval, "offline_keep_export", True):
+                shutil.rmtree(export_dir, ignore_errors=True)
+        except Exception as exc:
+            error_message = f"Offline generation eval failed at step {step}: {exc!r}"
+
+        error_payload = [error_message]
+        if torch.distributed.is_initialized():
+            torch.distributed.broadcast_object_list(error_payload, src=0)
+        if error_payload[0] is not None:
+            raise RuntimeError(error_payload[0])
+        return metric
 
     def _validate(self, meta_info, methods=None, global_step=None):
         methods = methods or self._available_eval_methods()
@@ -693,6 +887,121 @@ def prefix_generation_reward_metrics(metric, eval_name):
             prefixed_key = f"{eval_name}/{key}"
         prefixed_metric[prefixed_key] = value
     return prefixed_metric
+
+
+def atomic_write_json(path, payload):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
+
+
+def export_hf_model_for_offline_generation_eval(
+    model,
+    processing_class,
+    export_dir,
+    trust_remote_code=False,
+    export_dtype="bfloat16",
+):
+    from accelerate import init_empty_weights
+    from transformers import GenerationConfig
+    from transformers.dynamic_module_utils import custom_object_save
+
+    from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPConfig
+    from verl.utils.fs import local_mkdir_safe
+    from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    tmp_export_dir = f"{export_dir}.tmp"
+
+    if rank == 0:
+        shutil.rmtree(tmp_export_dir, ignore_errors=True)
+        shutil.rmtree(export_dir, ignore_errors=True)
+        local_mkdir_safe(tmp_export_dir)
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    unwrap_model = model._fsdp_wrapped_module if fsdp_version(model) == 1 else model
+    model_config = unwrap_model.config
+    generation_config = None
+    if unwrap_model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
+        try:
+            generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
+        except Exception:
+            generation_config = None
+
+    state_dict = get_fsdp_full_state_dict(model, offload_to_cpu=True, rank0_only=True)
+
+    if rank == 0:
+        target_dtype = get_torch_dtype(export_dtype) if export_dtype is not None else None
+        if target_dtype is not None:
+            state_dict = {
+                key: value.to(dtype=target_dtype) if torch.is_tensor(value) and value.is_floating_point() else value
+                for key, value in state_dict.items()
+            }
+
+        if hasattr(model_config, "auto_map") and None in model_config.auto_map:
+            model_config.auto_map = {key: value for key, value in model_config.auto_map.items() if key is not None}
+
+        model_config.save_pretrained(tmp_export_dir)
+        if processing_class is not None:
+            processing_class.save_pretrained(tmp_export_dir)
+        if generation_config is not None:
+            generation_config.save_pretrained(tmp_export_dir)
+        if hasattr(model_config, "auto_map"):
+            custom_object_save(unwrap_model, tmp_export_dir, config=model_config)
+
+        with open(os.path.join(tmp_export_dir, "fsdp_config.json"), "w") as file:
+            json.dump({"FSDP_version": fsdp_version(model), "world_size": world_size}, file, indent=2)
+
+        if "ForTokenClassification" in model_config.architectures[0]:
+            from transformers import AutoModelForTokenClassification
+
+            auto_model_cls = AutoModelForTokenClassification
+        elif "ForCausalLM" in model_config.architectures[0]:
+            from transformers import AutoModelForCausalLM
+
+            auto_model_cls = AutoModelForCausalLM
+        elif "ForConditionalGeneration" in model_config.architectures[0]:
+            import transformers
+            from packaging import version
+
+            if version.parse(transformers.__version__) >= version.parse("4.54.0"):
+                from transformers import AutoModelForImageTextToText
+
+                auto_model_cls = AutoModelForImageTextToText
+            else:
+                from transformers import AutoModelForVision2Seq
+
+                auto_model_cls = AutoModelForVision2Seq
+        else:
+            raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
+
+        with init_empty_weights():
+            save_model = auto_model_cls.from_config(
+                model_config,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=trust_remote_code,
+            )
+            from verl.trainer.ppo.value_categorical import extract_value_head_architecture_spec
+            from verl.utils.recurrent_value_head import patch_recurrent_value_head
+
+            patch_recurrent_value_head(save_model, extract_value_head_architecture_spec(model_config))
+        save_model.to_empty(device="cpu")
+        if save_model.can_generate() and generation_config is not None:
+            save_model.generation_config = generation_config
+        save_model.save_pretrained(tmp_export_dir, state_dict=state_dict)
+        del save_model
+        del state_dict
+        os.replace(tmp_export_dir, export_dir)
+        atomic_write_json(os.path.join(export_dir, "offline_eval_export.json"), {"ready": True, "world_size": world_size})
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
 
 def run_sft(config):
     from verl.utils.distributed import initialize_global_process_group
