@@ -44,55 +44,30 @@ else
   VENV="${VENV:-}"
 fi
 
-choose_writable_scratch() {
-  local candidate
-  local candidates=(
-    "${SCRATCH:-}"
-    "/scratch/09576/shuozhe"
-    "/tmp/${USER:-verl_user}"
-  )
-
-  for candidate in "${candidates[@]}"; do
-    if [[ -n "$candidate" ]] && mkdir -p "$candidate" 2>/dev/null && [[ -w "$candidate" ]]; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-
-  echo "No writable scratch/cache root found. Tried: ${candidates[*]}" >&2
-  return 1
-}
-
-ORIGINAL_SCRATCH="${SCRATCH:-}"
-SCRATCH="$(choose_writable_scratch)"
-if [[ -n "$ORIGINAL_SCRATCH" && "$SCRATCH" != "$ORIGINAL_SCRATCH" ]]; then
-  echo "Warning: SCRATCH=$ORIGINAL_SCRATCH is not writable; using SCRATCH=$SCRATCH instead." >&2
+# TACC should provide SCRATCH. Some environments incorrectly set cache/TMP paths
+# under /var/verl, which regular users cannot create. Reset those paths directly.
+if [[ -z "${SCRATCH:-}" || "${SCRATCH}" == /var/verl* ]]; then
+  if [[ "$IS_SLURM_JOB" == "1" ]]; then
+    SCRATCH="/scratch/09576/shuozhe"
+  else
+    SCRATCH="/tmp/${USER:-verl_user}"
+  fi
 fi
+export SCRATCH
 
-choose_writable_dir() {
-  local name="$1"
-  local current_value="$2"
-  local fallback_value="$3"
+if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == /var/verl* || "${TMPDIR}" == /var ]]; then
+  TMPDIR="${SCRATCH}/tmp"
+fi
+export TMPDIR
 
-  if [[ -n "$current_value" ]] && mkdir -p "$current_value" 2>/dev/null && [[ -w "$current_value" ]]; then
-    echo "$current_value"
-    return 0
-  fi
+case "${UV_CACHE_DIR:-}" in ""|/var/verl*) UV_CACHE_DIR="${SCRATCH}/.cache/uv" ;; esac
+case "${HF_HOME:-}" in ""|/var/verl*) HF_HOME="${SCRATCH}/.cache/huggingface" ;; esac
+case "${TIKTOKEN_ENCODINGS_BASE:-}" in ""|/var/verl*) TIKTOKEN_ENCODINGS_BASE="${SCRATCH}/data/embeddings" ;; esac
+case "${TORCH_EXTENSIONS_DIR:-}" in ""|/var/verl*) TORCH_EXTENSIONS_DIR="${SCRATCH}/.cache/torch_extensions" ;; esac
+case "${HF_DATASETS_CACHE:-}" in /var/verl*) unset HF_DATASETS_CACHE ;; esac
+case "${HF_MODULES_CACHE:-}" in /var/verl*) unset HF_MODULES_CACHE ;; esac
 
-  if [[ -n "$current_value" ]]; then
-    echo "Warning: $name=$current_value is not writable; using $fallback_value instead." >&2
-  fi
-
-  mkdir -p "$fallback_value"
-  echo "$fallback_value"
-}
-
-UV_CACHE_DIR="$(choose_writable_dir UV_CACHE_DIR "${UV_CACHE_DIR:-}" "${SCRATCH}/.cache/uv")"
-HF_HOME="$(choose_writable_dir HF_HOME "${HF_HOME:-}" "${SCRATCH}/.cache/huggingface")"
-TIKTOKEN_ENCODINGS_BASE="$(choose_writable_dir TIKTOKEN_ENCODINGS_BASE "${TIKTOKEN_ENCODINGS_BASE:-}" "${SCRATCH}/data/embeddings")"
-TORCH_EXTENSIONS_DIR="$(choose_writable_dir TORCH_EXTENSIONS_DIR "${TORCH_EXTENSIONS_DIR:-}" "${SCRATCH}/.cache/torch_extensions")"
-
-mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
+mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$HF_HOME" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
 
 export UV_CACHE_DIR
 export HF_HOME
@@ -129,11 +104,11 @@ VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test
 
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-SCRATCH_ROOT="$(choose_writable_dir SCRATCH_ROOT "${SCRATCH_ROOT:-}" "${SCRATCH}/verl_runs")"
+case "${SCRATCH_ROOT:-}" in ""|/var/verl*) SCRATCH_ROOT="${SCRATCH}/verl_runs" ;; esac
 RUN_DIR="${RUN_DIR:-${SCRATCH_ROOT}/${RUN_ID}}"
 LOG_DIR="${RUN_DIR}/logs"
 TRAIN_LOG_DIR="${RUN_DIR}/train_log"
-ARCHIVE_ROOT="$(choose_writable_dir ARCHIVE_ROOT "${ARCHIVE_ROOT:-}" "${REPO_ROOT}/verl/train_log_archive")"
+case "${ARCHIVE_ROOT:-}" in ""|/var/verl*) ARCHIVE_ROOT="${REPO_ROOT}/verl/train_log_archive" ;; esac
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 TRAIN_STDOUT_LOG="${TRAIN_LOG_DIR}/job_${RUN_ID}.txt"
 
