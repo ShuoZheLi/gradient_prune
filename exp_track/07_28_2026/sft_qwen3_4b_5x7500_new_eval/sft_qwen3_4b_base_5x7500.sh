@@ -5,7 +5,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=03:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=sft_qwen3_4b_5x7500-%j.out
 #SBATCH --error=sft_qwen3_4b_5x7500-%j.err
 
