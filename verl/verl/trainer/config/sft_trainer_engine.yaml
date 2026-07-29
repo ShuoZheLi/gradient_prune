@@ -148,6 +148,7 @@ trainer:
   logger: [ 'console', 'wandb' ]
   seed: 1
   save_freq: -1
+  save_initial_checkpoint: False
   test_freq: -1
   loss_test_freq: null
   max_ckpt_to_keep: null  # Maximum number of checkpoints to keep, set to null to keep all

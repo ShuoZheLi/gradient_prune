@@ -483,6 +483,10 @@ class SFTTrainer:
                 last_valid_metric = metric
             torch.distributed.barrier()
 
+        if global_step == 0 and self.config.trainer.get("save_initial_checkpoint", False):
+            aggressive_empty_cache(force_sync=True)
+            self.ckpt_handler.save_checkpoint(step=global_step)
+
         train_time = 0
         total_tokens = 0
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
