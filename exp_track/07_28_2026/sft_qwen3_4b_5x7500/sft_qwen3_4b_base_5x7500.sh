@@ -17,9 +17,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 WORK_DIR="${WORK_DIR:-${REPO_ROOT}/verl}"
-IS_SLURM_JOB=1
+IS_SLURM_JOB=0
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
   IS_SLURM_JOB=1
+fi
+
+if [[ "$IS_SLURM_JOB" == "1" ]]; then
+  SCRATCH="/scratch/09576/shuozhe"
+  unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR SCRATCH_ROOT XDG_CACHE_HOME
+  TMPDIR="${SCRATCH}/tmp"
+  mkdir -p "$TMPDIR"
+  export SCRATCH TMPDIR
 fi
 
 if [[ "$IS_SLURM_JOB" == "1" ]]; then
@@ -45,8 +53,7 @@ else
 fi
 
 if [[ "$IS_SLURM_JOB" == "1" ]]; then
-  SCRATCH="/scratch/09576/shuozhe"
-  unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR SCRATCH_ROOT
+  unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR SCRATCH_ROOT XDG_CACHE_HOME
 else
   SCRATCH="${SCRATCH:-/tmp/${USER:-verl_user}}"
 fi
@@ -401,13 +408,9 @@ if [[ "$IS_SLURM_JOB" == "1" ]]; then
   srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
     bash -c '
       set -euo pipefail
-      if [[ -n "'"${VENV}"'" ]]; then
-        set +u
-        source "'"${VENV}"'/bin/activate"
-        set -u
-      fi
-      cd "'"${WORK_DIR}"'"
-      export PYTHONPATH="'"${WORK_DIR}"'${PYTHONPATH:+:${PYTHONPATH}}"
+      export SCRATCH="'"${SCRATCH}"'"
+      export TMPDIR="'"${SCRATCH}"'/tmp"
+      unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR XDG_CACHE_HOME
       export UV_CACHE_DIR="'"${UV_CACHE_DIR}"'"
       export HF_HOME="'"${HF_HOME}"'"
       node_cache_root="'"${SCRATCH}"'/verl_'"${RUN_ID}"'_node_${SLURM_PROCID}"
@@ -415,7 +418,15 @@ if [[ "$IS_SLURM_JOB" == "1" ]]; then
       export HF_MODULES_CACHE="${HF_MODULES_CACHE_ROOT:-${node_cache_root}/huggingface_modules}"
       export TIKTOKEN_ENCODINGS_BASE="'"${TIKTOKEN_ENCODINGS_BASE}"'"
       export TORCH_EXTENSIONS_DIR="'"${TORCH_EXTENSIONS_DIR}"'/node_${SLURM_PROCID}"
-      mkdir -p "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TORCH_EXTENSIONS_DIR"
+      mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
+
+      if [[ -n "'"${VENV}"'" ]]; then
+        set +u
+        source "'"${VENV}"'/bin/activate"
+        set -u
+      fi
+      cd "'"${WORK_DIR}"'"
+      export PYTHONPATH="'"${WORK_DIR}"'${PYTHONPATH:+:${PYTHONPATH}}"
       export PYTHONUNBUFFERED=1
       export TOKENIZERS_PARALLELISM=true
       export HYDRA_FULL_ERROR="'"${HYDRA_FULL_ERROR}"'"
