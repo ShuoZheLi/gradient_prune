@@ -22,6 +22,7 @@ data:
   val_files: null
   loss_val_files: null
   generation_eval_files: null
+  generation_eval_names: null
   train_max_samples: -1  # set to -1 to use full dataset
   val_max_samples: -1  # set to -1 to use full dataset
   # Multi-turn settings

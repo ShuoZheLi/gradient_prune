@@ -26,12 +26,13 @@ os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import logging
+import re
 import warnings
 
 import hydra
 import torch
 import torch.distributed
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -217,6 +218,8 @@ class SFTTrainer:
 
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
         self.generation_val_dataset = None
+        self.generation_val_datasets = {}
+        self.generation_eval_prefix_metrics = False
 
         generation_val_files = config.data.get("generation_eval_files", None) or config.data.val_files
         if "generation_reward" in self.eval_methods:
@@ -225,13 +228,23 @@ class SFTTrainer:
                     "data.val_files or data.generation_eval_files must be set when "
                     "trainer.eval_method includes 'generation_reward'"
                 )
-            self.generation_val_dataset = create_generation_eval_dataset(
+            generation_eval_specs = normalize_generation_eval_specs(
                 generation_val_files,
-                config.data,
-                tokenizer,
-                processor,
-                max_samples=config.data.get("val_max_samples", -1),
+                config.data.get("generation_eval_names", None),
             )
+            self.generation_eval_prefix_metrics = (
+                len(generation_eval_specs) > 1 or any(spec["explicit_name"] for spec in generation_eval_specs)
+            )
+            for spec in generation_eval_specs:
+                self.generation_val_datasets[spec["name"]] = create_generation_eval_dataset(
+                    spec["files"],
+                    config.data,
+                    tokenizer,
+                    processor,
+                    max_samples=config.data.get("val_max_samples", -1),
+                )
+            if len(self.generation_val_datasets) == 1:
+                self.generation_val_dataset = next(iter(self.generation_val_datasets.values()))
 
     def _build_dataloader(self):
         # build dataset
@@ -281,29 +294,35 @@ class SFTTrainer:
         else:
             self.val_dataloader = None
 
-        if self.generation_val_dataset:
+        self.generation_val_samplers = {}
+        self.generation_val_dataloaders = {}
+        if self.generation_val_datasets:
             from verl.utils.dataset.rl_dataset import collate_fn as rlhf_collate_fn
 
-            self.generation_val_sampler = DistributedSampler(
-                self.generation_val_dataset,
-                shuffle=False,
-                num_replicas=dp_size,
-                rank=dp_rank,
-                drop_last=False,
-            )
             generation_eval_batch_size = self.config.data.get("generation_eval_batch_size", None)
             if generation_eval_batch_size is None:
                 generation_eval_batch_size = self.train_batch_size_per_dp
-            self.generation_val_dataloader = StatefulDataLoader(
-                dataset=self.generation_val_dataset,
-                batch_size=generation_eval_batch_size,
-                sampler=self.generation_val_sampler,
-                collate_fn=rlhf_collate_fn,
-                num_workers=self.config.data.num_workers,
-                pin_memory=False,
-                drop_last=False,
-                pin_memory_device=device_name,
-            )
+            for eval_name, eval_dataset in self.generation_val_datasets.items():
+                sampler = DistributedSampler(
+                    eval_dataset,
+                    shuffle=False,
+                    num_replicas=dp_size,
+                    rank=dp_rank,
+                    drop_last=False,
+                )
+                self.generation_val_samplers[eval_name] = sampler
+                self.generation_val_dataloaders[eval_name] = StatefulDataLoader(
+                    dataset=eval_dataset,
+                    batch_size=generation_eval_batch_size,
+                    sampler=sampler,
+                    collate_fn=rlhf_collate_fn,
+                    num_workers=self.config.data.num_workers,
+                    pin_memory=False,
+                    drop_last=False,
+                    pin_memory_device=device_name,
+                )
+            self.generation_val_sampler = next(iter(self.generation_val_samplers.values()))
+            self.generation_val_dataloader = next(iter(self.generation_val_dataloaders.values()))
         else:
             self.generation_val_dataloader = None
 
@@ -357,29 +376,34 @@ class SFTTrainer:
         return metric
 
     def _compute_generation_reward_validation_metrics(self, global_step=None):
-        local_eval = evaluate_generation_reward_batches(
-            model=self.engine.module,
-            tokenizer=self.model_config.tokenizer,
-            dataloader=self.generation_val_dataloader,
-            device=self.device_name,
-            config=self.config,
-            sync_version=global_step,
-        )
-        gathered_eval = [None for _ in range(self.engine.get_data_parallel_size())]
         dp_group = self.engine.get_data_parallel_group()
-        torch.distributed.all_gather_object(gathered_eval, local_eval, group=dp_group)
-        if self.engine.get_data_parallel_rank() != 0 or not self.engine.is_mp_src_rank_with_outputs():
-            return None
+        combined_metric = {}
+        for eval_name, dataloader in self.generation_val_dataloaders.items():
+            local_eval = evaluate_generation_reward_batches(
+                model=self.engine.module,
+                tokenizer=self.model_config.tokenizer,
+                dataloader=dataloader,
+                device=self.device_name,
+                config=self.config,
+                sync_version=global_step,
+            )
+            gathered_eval = [None for _ in range(self.engine.get_data_parallel_size())]
+            torch.distributed.all_gather_object(gathered_eval, local_eval, group=dp_group)
+            if self.engine.get_data_parallel_rank() != 0 or not self.engine.is_mp_src_rank_with_outputs():
+                continue
 
-        merged_eval = merge_generation_reward_results(gathered_eval)
-        metric = build_generation_reward_metrics(merged_eval)
+            merged_eval = merge_generation_reward_results(gathered_eval)
+            metric = build_generation_reward_metrics(merged_eval)
 
-        sample_count = len(merged_eval["sample_scores"])
-        if sample_count > 0:
-            metric["val-aux/reward/num_samples"] = sample_count
-            metric["val-aux/response_length/mean"] = float(np.mean(merged_eval["sample_response_lengths"]))
-            metric["val-aux/response_length/max"] = int(np.max(merged_eval["sample_response_lengths"]))
-        return metric
+            sample_count = len(merged_eval["sample_scores"])
+            if sample_count > 0:
+                metric["val-aux/reward/num_samples"] = sample_count
+                metric["val-aux/response_length/mean"] = float(np.mean(merged_eval["sample_response_lengths"]))
+                metric["val-aux/response_length/max"] = int(np.max(merged_eval["sample_response_lengths"]))
+            if self.generation_eval_prefix_metrics:
+                metric = prefix_generation_reward_metrics(metric, eval_name)
+            combined_metric.update(metric)
+        return combined_metric or None
 
     def _available_eval_methods(self):
         return [method for method in self.eval_methods if self._has_validation_dataloader(method)]
@@ -388,7 +412,7 @@ class SFTTrainer:
         if method == "loss":
             return self.val_dataloader is not None
         if method == "generation_reward":
-            return self.generation_val_dataloader is not None
+            return bool(getattr(self, "generation_val_dataloaders", None) or self.generation_val_dataloader is not None)
         raise ValueError(f"Unsupported eval method {method!r}")
 
     def _validate(self, meta_info, methods=None, global_step=None):
@@ -566,6 +590,109 @@ def normalize_eval_methods(eval_method):
     if not methods:
         raise ValueError("trainer.eval_method must enable at least one evaluation method")
     return tuple(methods)
+
+
+def normalize_generation_eval_specs(generation_eval_files, generation_eval_names=None):
+    files_by_name = _coerce_generation_eval_files(generation_eval_files)
+    explicit_names = _coerce_optional_name_list(generation_eval_names)
+    if explicit_names is not None and len(explicit_names) != len(files_by_name):
+        raise ValueError(
+            "data.generation_eval_names must have the same length as data.generation_eval_files when both are lists"
+        )
+
+    used_names = set()
+    specs = []
+    for index, (raw_name, files, explicit_name) in enumerate(files_by_name):
+        name = explicit_names[index] if explicit_names is not None else raw_name
+        if name is None:
+            name = _derive_generation_eval_name(files)
+        name = _make_unique_eval_name(_sanitize_generation_eval_name(name), used_names)
+        used_names.add(name)
+        specs.append({"name": name, "files": files, "explicit_name": explicit_name or explicit_names is not None})
+    return specs
+
+
+def _coerce_generation_eval_files(generation_eval_files):
+    if isinstance(generation_eval_files, str):
+        files = _split_generation_eval_string(generation_eval_files)
+        return [(None, file_path, False) for file_path in files]
+    if isinstance(generation_eval_files, (dict, DictConfig)):
+        return [
+            (str(name), _coerce_eval_file_group(files), True)
+            for name, files in generation_eval_files.items()
+            if files is not None
+        ]
+
+    files = []
+    for item in list(generation_eval_files):
+        if isinstance(item, (dict, DictConfig)):
+            files.extend(_coerce_generation_eval_files(item))
+        else:
+            files.append((None, _coerce_eval_file_group(item), False))
+    return files
+
+
+def _split_generation_eval_string(value):
+    value = value.strip()
+    if not value or value == "null":
+        return []
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+        return [item.strip().strip('"\'') for item in value.split(",") if item.strip()]
+    if "," in value:
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return value.split()
+
+
+def _coerce_eval_file_group(files):
+    if isinstance(files, str):
+        split_files = _split_generation_eval_string(files)
+        return split_files[0] if len(split_files) == 1 else split_files
+    if isinstance(files, ListConfig):
+        return list(files)
+    return list(files)
+
+
+def _coerce_optional_name_list(generation_eval_names):
+    if generation_eval_names is None:
+        return None
+    if isinstance(generation_eval_names, str):
+        names = _split_generation_eval_string(generation_eval_names)
+    else:
+        names = list(generation_eval_names)
+    return [str(name) for name in names]
+
+
+def _derive_generation_eval_name(files):
+    first_file = files[0] if isinstance(files, list) else files
+    stem = os.path.splitext(os.path.basename(str(first_file).rstrip("/")))[0]
+    return stem or "eval"
+
+
+def _sanitize_generation_eval_name(name):
+    name = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(name).strip())
+    return name.strip("_") or "eval"
+
+
+def _make_unique_eval_name(name, used_names):
+    if name not in used_names:
+        return name
+    suffix = 2
+    while f"{name}_{suffix}" in used_names:
+        suffix += 1
+    return f"{name}_{suffix}"
+
+
+def prefix_generation_reward_metrics(metric, eval_name):
+    prefixed_metric = {}
+    for key, value in metric.items():
+        parts = key.split("/")
+        if parts and parts[0] in {"val-core", "val-aux"}:
+            prefixed_key = "/".join([parts[0], eval_name, *parts[1:]])
+        else:
+            prefixed_key = f"{eval_name}/{key}"
+        prefixed_metric[prefixed_key] = value
+    return prefixed_metric
 
 def run_sft(config):
     from verl.utils.distributed import initialize_global_process_group

@@ -11,8 +11,10 @@ from verl.trainer.sft_trainer import (
     generate_texts_from_prompts,
     get_generation_autocast_dtype,
     get_vllm_sampling_params,
+    normalize_generation_eval_specs,
     normalize_eval_methods,
     merge_generation_reward_results,
+    prefix_generation_reward_metrics,
     repeat_non_tensor_batch,
     score_generation_outputs,
     sync_fsdp_weights_to_vllm,
@@ -81,6 +83,36 @@ def test_normalize_eval_methods_supports_single_both_and_lists():
     assert normalize_eval_methods("generation_reward") == ("generation_reward",)
     assert normalize_eval_methods("both") == ("loss", "generation_reward")
     assert normalize_eval_methods(["loss", "generation_reward", "loss"]) == ("loss", "generation_reward")
+
+
+def test_normalize_generation_eval_specs_supports_lists_names_and_dicts():
+    specs = normalize_generation_eval_specs(
+        ["/data/math/test.parquet", "/data/aime/aime_24.parquet"],
+        ["math500", "aime24"],
+    )
+
+    assert specs == [
+        {"name": "math500", "files": "/data/math/test.parquet", "explicit_name": True},
+        {"name": "aime24", "files": "/data/aime/aime_24.parquet", "explicit_name": True},
+    ]
+
+    dict_specs = normalize_generation_eval_specs(
+        {"math500": "/data/math/test.parquet", "aime24": "/data/aime/aime_24.parquet"}
+    )
+    assert [spec["name"] for spec in dict_specs] == ["math500", "aime24"]
+    assert all(spec["explicit_name"] for spec in dict_specs)
+
+
+def test_prefix_generation_reward_metrics_keeps_wandb_sections_separate():
+    metric = {
+        "val-core/math/acc/mean@1": 0.5,
+        "val-aux/reward/num_samples": 500,
+    }
+
+    assert prefix_generation_reward_metrics(metric, "aime24") == {
+        "val-core/aime24/math/acc/mean@1": 0.5,
+        "val-aux/aime24/reward/num_samples": 500,
+    }
 
 
 def test_should_validate_method_uses_per_method_frequency_overrides():

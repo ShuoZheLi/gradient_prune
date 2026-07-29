@@ -61,6 +61,8 @@ WORK_DIR="${WORK_DIR:-/work/09576/shuozhe/gradient_prune/verl}"
 MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/work2/09576/shuozhe/saved_model/Qwen3-1.7B-Base}"
 TRAIN_FILE="${TRAIN_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
 VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
+MATH_500_EVAL_FILE="${MATH_500_EVAL_FILE:-${VAL_FILE}}"
+AIME_24_25_26_EVAL_FILE="${AIME_24_25_26_EVAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/aime_24_25_26.parquet}"
 
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -97,7 +99,12 @@ generation_eval_freq=${generation_eval_freq:-50}
 
 # loss_eval_files must be SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
 loss_eval_files=${loss_eval_files:-__TRAIN_FILE__}
-generation_eval_files=${generation_eval_files:-${VAL_FILE}}
+if [[ -z "${generation_eval_files+x}" ]]; then
+  generation_eval_files="${MATH_500_EVAL_FILE} ${AIME_24_25_26_EVAL_FILE}"
+  generation_eval_names=${generation_eval_names:-"math_500 aime_24_25_26"}
+else
+  generation_eval_names=${generation_eval_names:-}
+fi
 val_max_samples=${val_max_samples:--1}
 train_max_samples=${train_max_samples:--1}
 trainer_logger=${trainer_logger:-'["console","wandb"]'}
@@ -193,6 +200,48 @@ describe_path() {
   fi
 }
 
+normalize_hydra_list_if_many() {
+  python3 - "$1" <<'PY'
+import json
+import shlex
+import sys
+
+raw = sys.argv[1].strip()
+if raw.startswith(("[", "{")) or raw in {"", "null"}:
+    print(raw)
+else:
+    items = shlex.split(raw)
+    print(json.dumps(items, separators=(",", ":")) if len(items) > 1 else raw)
+PY
+}
+
+list_eval_paths() {
+  python3 - "$1" <<'PY'
+import json
+import shlex
+import sys
+
+raw = sys.argv[1].strip()
+if not raw or raw == "null":
+    raise SystemExit
+if raw.startswith("["):
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        items = [item.strip().strip('"\'') for item in raw[1:-1].split(",") if item.strip()]
+elif raw.startswith("{"):
+    body = raw[1:-1]
+    items = []
+    for pair in body.split(","):
+        if ":" in pair:
+            items.append(pair.split(":", 1)[1].strip().strip('"\''))
+else:
+    items = shlex.split(raw)
+for item in items:
+    print(item)
+PY
+}
+
 sync_to_work() {
   echo "Syncing lightweight logs/metadata back to archive; checkpoints stay in RUN_DIR."
   mkdir -p "$ARCHIVE_DIR"
@@ -271,6 +320,11 @@ esac
 if [[ "$loss_eval_files" == "__TRAIN_FILE__" || "$loss_eval_files" == "$RAW_TRAIN_FILE" ]]; then
   loss_eval_files="$TRAIN_FILE"
 fi
+generation_eval_files="$(normalize_hydra_list_if_many "$generation_eval_files")"
+if [[ -n "$generation_eval_names" ]]; then
+  generation_eval_names="$(normalize_hydra_list_if_many "$generation_eval_names")"
+fi
+PRIMARY_VAL_FILE="$(list_eval_paths "$generation_eval_files" | head -n 1)"
 
 # -----------------------------
 # Debug info and input checks
@@ -293,6 +347,9 @@ describe_path "TRAIN_FILE" "$TRAIN_FILE"
 describe_path "VAL_FILE" "$VAL_FILE"
 describe_path "loss_eval_files" "$loss_eval_files"
 describe_path "generation_eval_files" "$generation_eval_files"
+if [[ -n "$generation_eval_names" ]]; then
+  echo "generation_eval_names: $generation_eval_names"
+fi
 echo "eval_method: $eval_method"
 echo "trainer_logger: $trainer_logger"
 echo "truncation: $truncation"
@@ -300,15 +357,17 @@ echo "generation_eval_enable_thinking: $generation_eval_enable_thinking"
 
 ls -ld "$WORK_DIR"
 ls -lh "$TRAIN_FILE"
-if [[ "$VAL_FILE" != "null" && -n "$VAL_FILE" ]]; then
-  ls -lh "$VAL_FILE"
-fi
+while IFS= read -r eval_path; do
+  if [[ "$eval_path" != "null" && -n "$eval_path" ]]; then
+    ls -lh "$eval_path"
+  fi
+done < <(list_eval_paths "$generation_eval_files")
 
 cd "$WORK_DIR"
 
 TRAINER_ARGS=(
   data.train_files="$TRAIN_FILE"
-  data.val_files="$VAL_FILE"
+  data.val_files="$PRIMARY_VAL_FILE"
   data.loss_val_files="$loss_eval_files"
   data.generation_eval_files="$generation_eval_files"
   data.generation_eval_batch_size="$generation_eval_batch_size"
@@ -356,6 +415,10 @@ TRAINER_ARGS=(
   trainer.n_gpus_per_node="$GPUS_PER_NODE"
   sparse_update.enabled=false
 )
+
+if [[ -n "$generation_eval_names" ]]; then
+  TRAINER_ARGS+=(data.generation_eval_names="$generation_eval_names")
+fi
 
 # -----------------------------
 # Run SFT training
