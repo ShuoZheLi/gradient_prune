@@ -243,6 +243,102 @@ for item in items:
 PY
 }
 
+print_planned_checkpoint_dirs() {
+  python3 - \
+    "$TRAIN_FILE" \
+    "$train_max_samples" \
+    "$train_batch_size" \
+    "$total_epochs" \
+    "$save_freq" \
+    "$save_initial_checkpoint" \
+    "$TRAIN_LOG_DIR" \
+    "$NNODES" \
+    "$GPUS_PER_NODE" <<'PY'
+import os
+import sys
+
+(
+    train_file,
+    train_max_samples,
+    train_batch_size,
+    total_epochs,
+    save_freq,
+    save_initial_checkpoint,
+    train_log_dir,
+    nnodes,
+    gpus_per_node,
+) = sys.argv[1:]
+
+
+def parse_int(name, value):
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SystemExit(f"Unable to parse {name}={value!r} while planning checkpoint paths.") from exc
+
+
+def truthy(value):
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+try:
+    import pyarrow.parquet as pq
+
+    num_samples = pq.ParquetFile(train_file).metadata.num_rows
+except Exception as exc:
+    print(f"Unable to plan checkpoint paths because train parquet row count failed: {exc}")
+    raise SystemExit(0)
+
+max_samples = parse_int("train_max_samples", train_max_samples)
+if max_samples > 0:
+    num_samples = min(num_samples, max_samples)
+
+global_batch_size = parse_int("train_batch_size", train_batch_size)
+epochs = parse_int("total_epochs", total_epochs)
+dp_size = parse_int("NNODES", nnodes) * parse_int("GPUS_PER_NODE", gpus_per_node)
+
+if dp_size <= 0 or global_batch_size <= 0 or epochs <= 0:
+    print("Unable to plan checkpoint paths because dp size, batch size, or epochs is non-positive.")
+    raise SystemExit(0)
+
+batch_size_per_dp = global_batch_size // dp_size
+if batch_size_per_dp <= 0:
+    print("Unable to plan checkpoint paths because train_batch_size is smaller than data-parallel size.")
+    raise SystemExit(0)
+
+# Match SFTTrainer: DistributedSampler(drop_last=True) then StatefulDataLoader(drop_last=True).
+samples_per_dp = num_samples // dp_size
+steps_per_epoch = samples_per_dp // batch_size_per_dp
+total_steps = steps_per_epoch * epochs
+
+planned_steps = []
+if total_steps > 0 and truthy(save_initial_checkpoint):
+    planned_steps.append(0)
+
+if save_freq == "after_each_epoch":
+    freq = steps_per_epoch
+else:
+    freq = parse_int("save_freq", save_freq)
+
+if total_steps > 0 and freq > 0:
+    planned_steps.extend(range(freq, total_steps + 1, freq))
+
+if total_steps > 0:
+    planned_steps.append(total_steps)
+
+seen = set()
+unique_steps = []
+for step in planned_steps:
+    if step not in seen:
+        seen.add(step)
+        unique_steps.append(step)
+
+print("Planned checkpoint directories, one per line:")
+for step in unique_steps:
+    print(os.path.join(train_log_dir, f"global_step_{step}"))
+PY
+}
+
 sync_to_work() {
   echo "Syncing lightweight logs/metadata back to archive; checkpoints stay in RUN_DIR."
   mkdir -p "$ARCHIVE_DIR"
@@ -421,6 +517,8 @@ TRAINER_ARGS=(
 if [[ -n "$generation_eval_names" ]]; then
   TRAINER_ARGS+=(data.generation_eval_names="$generation_eval_names")
 fi
+
+print_planned_checkpoint_dirs
 
 # -----------------------------
 # Run SFT training
