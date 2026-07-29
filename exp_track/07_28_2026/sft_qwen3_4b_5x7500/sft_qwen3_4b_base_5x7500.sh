@@ -44,30 +44,18 @@ else
   VENV="${VENV:-}"
 fi
 
-# TACC should provide SCRATCH. Some environments incorrectly set cache/TMP paths
-# under /var/verl, which regular users cannot create. Reset those paths directly.
-if [[ -z "${SCRATCH:-}" || "${SCRATCH}" == /var/verl* ]]; then
-  if [[ "$IS_SLURM_JOB" == "1" ]]; then
-    SCRATCH="/scratch/09576/shuozhe"
-  else
-    SCRATCH="/tmp/${USER:-verl_user}"
-  fi
+if [[ "$IS_SLURM_JOB" == "1" ]]; then
+  SCRATCH="/scratch/09576/shuozhe"
+  unset UV_CACHE_DIR HF_HOME HF_DATASETS_CACHE HF_MODULES_CACHE TIKTOKEN_ENCODINGS_BASE TORCH_EXTENSIONS_DIR SCRATCH_ROOT
+else
+  SCRATCH="${SCRATCH:-/tmp/${USER:-verl_user}}"
 fi
-export SCRATCH
+UV_CACHE_DIR="${UV_CACHE_DIR:-${SCRATCH}/.cache/uv}"
+HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
+TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${SCRATCH}/data/embeddings}"
+TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${SCRATCH}/.cache/torch_extensions}"
 
-if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == /var/verl* || "${TMPDIR}" == /var ]]; then
-  TMPDIR="${SCRATCH}/tmp"
-fi
-export TMPDIR
-
-case "${UV_CACHE_DIR:-}" in ""|/var/verl*) UV_CACHE_DIR="${SCRATCH}/.cache/uv" ;; esac
-case "${HF_HOME:-}" in ""|/var/verl*) HF_HOME="${SCRATCH}/.cache/huggingface" ;; esac
-case "${TIKTOKEN_ENCODINGS_BASE:-}" in ""|/var/verl*) TIKTOKEN_ENCODINGS_BASE="${SCRATCH}/data/embeddings" ;; esac
-case "${TORCH_EXTENSIONS_DIR:-}" in ""|/var/verl*) TORCH_EXTENSIONS_DIR="${SCRATCH}/.cache/torch_extensions" ;; esac
-case "${HF_DATASETS_CACHE:-}" in /var/verl*) unset HF_DATASETS_CACHE ;; esac
-case "${HF_MODULES_CACHE:-}" in /var/verl*) unset HF_MODULES_CACHE ;; esac
-
-mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$HF_HOME" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
+mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
 
 export UV_CACHE_DIR
 export HF_HOME
@@ -104,11 +92,11 @@ VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test
 
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-case "${SCRATCH_ROOT:-}" in ""|/var/verl*) SCRATCH_ROOT="${SCRATCH}/verl_runs" ;; esac
+SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH}/verl_runs}"
 RUN_DIR="${RUN_DIR:-${SCRATCH_ROOT}/${RUN_ID}}"
 LOG_DIR="${RUN_DIR}/logs"
 TRAIN_LOG_DIR="${RUN_DIR}/train_log"
-case "${ARCHIVE_ROOT:-}" in ""|/var/verl*) ARCHIVE_ROOT="${REPO_ROOT}/verl/train_log_archive" ;; esac
+ARCHIVE_ROOT="${ARCHIVE_ROOT:-${REPO_ROOT}/verl/train_log_archive}"
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 TRAIN_STDOUT_LOG="${TRAIN_LOG_DIR}/job_${RUN_ID}.txt"
 
@@ -422,7 +410,7 @@ if [[ "$IS_SLURM_JOB" == "1" ]]; then
       export PYTHONPATH="'"${WORK_DIR}"'${PYTHONPATH:+:${PYTHONPATH}}"
       export UV_CACHE_DIR="'"${UV_CACHE_DIR}"'"
       export HF_HOME="'"${HF_HOME}"'"
-      node_cache_root="${TMPDIR:-/tmp}/verl_'"${RUN_ID}"'_node_${SLURM_PROCID}"
+      node_cache_root="'"${SCRATCH}"'/verl_'"${RUN_ID}"'_node_${SLURM_PROCID}"
       export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_ROOT:-${node_cache_root}/huggingface_datasets}"
       export HF_MODULES_CACHE="${HF_MODULES_CACHE_ROOT:-${node_cache_root}/huggingface_modules}"
       export TIKTOKEN_ENCODINGS_BASE="'"${TIKTOKEN_ENCODINGS_BASE}"'"
