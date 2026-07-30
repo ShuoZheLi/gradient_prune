@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=eval_qwen3_1d7b_global_step_0
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh
+#SBATCH --partition=gh-dev
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
