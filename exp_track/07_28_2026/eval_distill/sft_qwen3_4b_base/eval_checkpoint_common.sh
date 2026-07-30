@@ -34,7 +34,7 @@ find_repo_root() {
 
 repo_root="${WORK_DIR:-${REPO_ROOT:-}}"
 if [[ -z "$repo_root" ]]; then
-  for candidate in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$(dirname -- "${BASH_SOURCE[0]}")" "/work2/09576/shuozhe/gradient_prune" "/data/shuozhe/gradient_prune"; do
+  for candidate in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$(dirname -- "${BASH_SOURCE[0]}")" "/work2/09576/shuozhe/gradient_prune"; do
     [[ -z "$candidate" ]] && continue
     if repo_root="$(find_repo_root "$candidate")"; then
       break

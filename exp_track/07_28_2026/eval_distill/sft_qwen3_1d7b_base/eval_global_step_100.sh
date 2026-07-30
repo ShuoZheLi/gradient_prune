@@ -18,22 +18,14 @@ export RUN_NAME="${RUN_NAME:-sft_qwen3_1d7b_base_global_step_100_math500_eval}"
 
 common_script="${EVAL_COMMON_SCRIPT:-}"
 if [[ -z "$common_script" ]]; then
-  common_candidates=(
-    "$(dirname -- "${BASH_SOURCE[0]}")/eval_checkpoint_common.sh"
-    "${SLURM_SUBMIT_DIR:-}/eval_checkpoint_common.sh"
-    "/data/shuozhe/gradient_prune/exp_track/07_28_2026/eval_distill/sft_qwen3_1d7b_base/eval_checkpoint_common.sh"
-    "/work2/09576/shuozhe/gradient_prune/exp_track/07_28_2026/eval_distill/sft_qwen3_1d7b_base/eval_checkpoint_common.sh"
-  )
-  for candidate in "${common_candidates[@]}"; do
-    [[ -z "$candidate" ]] && continue
-    if [[ -f "$candidate" ]]; then
-      common_script="$candidate"
-      break
-    fi
-  done
+  if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/eval_checkpoint_common.sh" ]]; then
+    common_script="${SLURM_SUBMIT_DIR}/eval_checkpoint_common.sh"
+  else
+    common_script="$(dirname -- "${BASH_SOURCE[0]}")/eval_checkpoint_common.sh"
+  fi
 fi
-if [[ -z "$common_script" || ! -f "$common_script" ]]; then
-  echo "Could not locate eval_checkpoint_common.sh. Set EVAL_COMMON_SCRIPT=/path/to/eval_checkpoint_common.sh" >&2
+if [[ ! -f "$common_script" ]]; then
+  echo "Could not locate eval_checkpoint_common.sh beside eval_global_step script. Submit from that directory or set EVAL_COMMON_SCRIPT=/path/to/eval_checkpoint_common.sh" >&2
   exit 1
 fi
 exec "$common_script"
