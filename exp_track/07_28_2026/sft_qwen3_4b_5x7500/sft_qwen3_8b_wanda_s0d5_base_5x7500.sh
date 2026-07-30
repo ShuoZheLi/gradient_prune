@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=sft_qwen3_8b_wanda_s0d5
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh
+#SBATCH --partition=gh-dev
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
