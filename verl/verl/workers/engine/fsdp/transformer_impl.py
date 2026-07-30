@@ -126,6 +126,7 @@ class FSDPEngine(BaseEngine):
         self.sparse_update_manager = None
         self._sparse_update_prepared_masks = None
         self._sparse_update_prepared_metadata = None
+        self._use_orig_params = self.engine_config.use_orig_params
 
         self.mode = None
 
@@ -364,7 +365,7 @@ class FSDPEngine(BaseEngine):
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
                 forward_prefetch=self.engine_config.forward_prefetch,
-                use_orig_params=self.engine_config.use_orig_params,
+                use_orig_params=self._use_orig_params,
                 cpu_offload=cpu_offload,
             )
         elif self.engine_config.strategy == "fsdp2":
@@ -491,8 +492,8 @@ class FSDPEngine(BaseEngine):
             and self.sparse_update_config is not None
             and self.sparse_update_config.get("enabled", False)
         ):
-            if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:
-                self.engine_config.use_orig_params = True
+            if self.engine_config.strategy == "fsdp" and not self._use_orig_params:
+                self._use_orig_params = True
                 if self.rank == 0:
                     print("sparse_update requires FSDP use_orig_params=True; enabling it for actor.")
             self._sparse_update_prepared_masks, self._sparse_update_prepared_metadata = (
