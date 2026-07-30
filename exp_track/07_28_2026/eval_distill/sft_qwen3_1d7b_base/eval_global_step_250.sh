@@ -16,5 +16,24 @@ export MODEL_PATH="/scratch/09576/shuozhe/verl_runs/sft_qwen3_1d7b_base_5x7500_8
 export DATASET_PATH="${DATASET_PATH:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
 export RUN_NAME="${RUN_NAME:-sft_qwen3_1d7b_base_global_step_250_math500_eval}"
 
-script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec "$script_dir/eval_checkpoint_common.sh"
+common_script="${EVAL_COMMON_SCRIPT:-}"
+if [[ -z "$common_script" ]]; then
+  common_candidates=(
+    "$(dirname -- "${BASH_SOURCE[0]}")/eval_checkpoint_common.sh"
+    "${SLURM_SUBMIT_DIR:-}/eval_checkpoint_common.sh"
+    "/data/shuozhe/gradient_prune/exp_track/07_28_2026/eval_distill/sft_qwen3_1d7b_base/eval_checkpoint_common.sh"
+    "/work2/09576/shuozhe/gradient_prune/exp_track/07_28_2026/eval_distill/sft_qwen3_1d7b_base/eval_checkpoint_common.sh"
+  )
+  for candidate in "${common_candidates[@]}"; do
+    [[ -z "$candidate" ]] && continue
+    if [[ -f "$candidate" ]]; then
+      common_script="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$common_script" || ! -f "$common_script" ]]; then
+  echo "Could not locate eval_checkpoint_common.sh. Set EVAL_COMMON_SCRIPT=/path/to/eval_checkpoint_common.sh" >&2
+  exit 1
+fi
+exec "$common_script"
