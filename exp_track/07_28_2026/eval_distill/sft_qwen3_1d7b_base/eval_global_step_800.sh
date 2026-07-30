@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=02:30:00
+#SBATCH --time=04:00:00
 #SBATCH --output=slurm-%j_eval_qwen3_1d7b_global_step_800.out
 #SBATCH --error=slurm-%j_eval_qwen3_1d7b_global_step_800.err
 
