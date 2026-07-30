@@ -81,6 +81,7 @@ run_name="${RUN_NAME:-sft_qwen3_1d7b_base_${checkpoint_name}_math500_eval}"
 run_id="${RUN_ID:-${run_name}_${SLURM_JOB_ID:-manual}}"
 
 dataset_path="${DATASET_PATH:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
+tokenizer_path="${TOKENIZER_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-1.7B-Base}"
 results_base="${RESULTS_BASE:-${RESULTS_ROOT:-${scratch_root}/gradient_prune/results}}"
 results_subdir="${RESULTS_SUBDIR:-eval_distill/sft_qwen3_1d7b_base/${checkpoint_name}}"
 run_root="${RUN_OUTPUT_DIR:-${results_base}/${results_subdir}/runs/${run_id}}"
@@ -138,6 +139,10 @@ if [[ "$dry_run" != "1" && ! -d "$MODEL_PATH" ]]; then
   echo "Model path does not exist: $MODEL_PATH" >&2
   exit 2
 fi
+if [[ "$dry_run" != "1" && ! -d "$tokenizer_path" ]]; then
+  echo "Tokenizer path does not exist: $tokenizer_path" >&2
+  exit 2
+fi
 if [[ "$dry_run" != "1" && ! -f "$dataset_path" ]]; then
   echo "Dataset path does not exist: $dataset_path" >&2
   exit 2
@@ -182,6 +187,7 @@ RUN_ID=$run_id
 MODEL_PATH=$MODEL_PATH
 CHECKPOINT_NAME=$checkpoint_name
 DATASET_PATH=$dataset_path
+TOKENIZER_PATH=$tokenizer_path
 OUTPUT_DIR=$output_dir
 RAW_JSONL=$raw_jsonl
 METRICS_JSON=$metrics_json
@@ -210,6 +216,7 @@ EOF_CONFIG
 echo "[eval] run_name=$run_name"
 echo "[eval] model_path=$MODEL_PATH"
 echo "[eval] dataset_path=$dataset_path"
+echo "[eval] tokenizer_path=$tokenizer_path"
 echo "[eval] output_dir=$output_dir"
 echo "[eval] nodes=${nodes_array[*]} local_devices=$local_devices num_shards=$num_shards"
 echo "[eval] max_examples=$max_examples max_new_tokens=$max_new_tokens batch_size=$batch_size"
@@ -225,6 +232,7 @@ run_eval_shard() {
   local cmd=(
     create_calibration_dataset/vllm_accuracy_runner.py
     --model_path "$MODEL_PATH"
+    --tokenizer_path "$tokenizer_path"
     --dataset_path "$dataset_path"
     --output_path "$shard_output"
     --metrics_path "$shard_metrics"
@@ -286,7 +294,7 @@ launch_shard() {
 
   if [[ -n "${SLURM_JOB_ID:-}" && "$num_nodes" -gt 1 ]]; then
     local remote_cmd
-    remote_cmd="cd $(printf '%q' "$repo_root") && source $(printf '%q' "${VIRTUAL_ENV:-}/bin/activate") 2>/dev/null || true; export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TASK_SCORER_BACKEND=$(printf '%q' "$TASK_SCORER_BACKEND") TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") VLLM_NO_USAGE_STATS=1 VLLM_WORKER_MULTIPROC_METHOD=$(printf '%q' "$VLLM_WORKER_MULTIPROC_METHOD") VLLM_USE_V1=$(printf '%q' "$VLLM_USE_V1") MODEL_PATH=$(printf '%q' "$MODEL_PATH") dataset_path=$(printf '%q' "$dataset_path") prompt_key=$(printf '%q' "$prompt_key") response_key=$(printf '%q' "$response_key") reward_score_dir=$(printf '%q' "$reward_score_dir") seed=$(printf '%q' "$seed") max_prompt_length=$(printf '%q' "$max_prompt_length") max_new_tokens=$(printf '%q' "$max_new_tokens") batch_size=$(printf '%q' "$batch_size") generation_max_batch_tokens=$(printf '%q' "$generation_max_batch_tokens") response_log_max=$(printf '%q' "$response_log_max") num_responses_per_prompt=$(printf '%q' "$num_responses_per_prompt") multi_response_temperature=$(printf '%q' "$multi_response_temperature") temperature=$(printf '%q' "$temperature") top_p=$(printf '%q' "$top_p") top_k=$(printf '%q' "$top_k") tensor_parallel_size=$(printf '%q' "$tensor_parallel_size") gpu_memory_utilization=$(printf '%q' "$gpu_memory_utilization") vllm_dtype=$(printf '%q' "$vllm_dtype") enable_thinking=$(printf '%q' "$enable_thinking") enforce_eager=$(printf '%q' "$enforce_eager") dry_run=0 python_bin=$(printf '%q' "$python_bin"); $(declare -f run_eval_shard); run_eval_shard $(printf '%q' "$shard_id") $(printf '%q' "$shard_start") $(printf '%q' "$shard_count") $(printf '%q' "$shard_device") $(printf '%q' "$shard_output") $(printf '%q' "$shard_metrics")"
+    remote_cmd="cd $(printf '%q' "$repo_root") && source $(printf '%q' "${VIRTUAL_ENV:-}/bin/activate") 2>/dev/null || true; export PYTHONPATH=$(printf '%q' "$PYTHONPATH") UV_CACHE_DIR=$(printf '%q' "$UV_CACHE_DIR") HF_HOME=$(printf '%q' "$HF_HOME") TRANSFORMERS_CACHE=$(printf '%q' "$TRANSFORMERS_CACHE") HF_DATASETS_CACHE=$(printf '%q' "$HF_DATASETS_CACHE") TORCH_HOME=$(printf '%q' "$TORCH_HOME") TRITON_CACHE_DIR=$(printf '%q' "$TRITON_CACHE_DIR") XDG_CACHE_HOME=$(printf '%q' "$XDG_CACHE_HOME") TIKTOKEN_ENCODINGS_BASE=$(printf '%q' "$TIKTOKEN_ENCODINGS_BASE") PYTHONUNBUFFERED=1 TASK_SCORER_BACKEND=$(printf '%q' "$TASK_SCORER_BACKEND") TOKENIZERS_PARALLELISM=$(printf '%q' "$TOKENIZERS_PARALLELISM") VLLM_NO_USAGE_STATS=1 VLLM_WORKER_MULTIPROC_METHOD=$(printf '%q' "$VLLM_WORKER_MULTIPROC_METHOD") VLLM_USE_V1=$(printf '%q' "$VLLM_USE_V1") MODEL_PATH=$(printf '%q' "$MODEL_PATH") tokenizer_path=$(printf '%q' "$tokenizer_path") dataset_path=$(printf '%q' "$dataset_path") prompt_key=$(printf '%q' "$prompt_key") response_key=$(printf '%q' "$response_key") reward_score_dir=$(printf '%q' "$reward_score_dir") seed=$(printf '%q' "$seed") max_prompt_length=$(printf '%q' "$max_prompt_length") max_new_tokens=$(printf '%q' "$max_new_tokens") batch_size=$(printf '%q' "$batch_size") generation_max_batch_tokens=$(printf '%q' "$generation_max_batch_tokens") response_log_max=$(printf '%q' "$response_log_max") num_responses_per_prompt=$(printf '%q' "$num_responses_per_prompt") multi_response_temperature=$(printf '%q' "$multi_response_temperature") temperature=$(printf '%q' "$temperature") top_p=$(printf '%q' "$top_p") top_k=$(printf '%q' "$top_k") tensor_parallel_size=$(printf '%q' "$tensor_parallel_size") gpu_memory_utilization=$(printf '%q' "$gpu_memory_utilization") vllm_dtype=$(printf '%q' "$vllm_dtype") enable_thinking=$(printf '%q' "$enable_thinking") enforce_eager=$(printf '%q' "$enforce_eager") dry_run=0 python_bin=$(printf '%q' "$python_bin"); $(declare -f run_eval_shard); run_eval_shard $(printf '%q' "$shard_id") $(printf '%q' "$shard_start") $(printf '%q' "$shard_count") $(printf '%q' "$shard_device") $(printf '%q' "$shard_output") $(printf '%q' "$shard_metrics")"
     srun --nodes=1 --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" --nodelist="$node" bash -lc "$remote_cmd" >"$shard_log" 2>&1 &
   else
     run_eval_shard "$shard_id" "$shard_start" "$shard_count" "$shard_device" "$shard_output" "$shard_metrics" >"$shard_log" 2>&1 &

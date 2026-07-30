@@ -14,6 +14,7 @@ set -euo pipefail
 export CHECKPOINT_NAME="global_step_50"
 export MODEL_PATH="/scratch/09576/shuozhe/verl_runs/sft_qwen3_1d7b_base_5x7500_874989/train_log/global_step_50"
 export DATASET_PATH="${DATASET_PATH:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-1.7B-Base}"
 export RUN_NAME="${RUN_NAME:-sft_qwen3_1d7b_base_global_step_50_math500_eval}"
 
 common_script="${EVAL_COMMON_SCRIPT:-}"

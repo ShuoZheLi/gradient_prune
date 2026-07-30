@@ -107,6 +107,7 @@ def score_response(example: ExampleRecord, response_text: str, reward_score_dir:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run downstream task accuracy with vLLM in an isolated process.")
     parser.add_argument("--model_path", required=True)
+    parser.add_argument("--tokenizer_path", default=None, help="Tokenizer path. Defaults to model_path.")
     parser.add_argument("--dataset_path", required=True)
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--metrics_path", required=True)
@@ -195,7 +196,8 @@ def main() -> None:
     configure_cuda_multiprocessing()
     args = parse_args()
     args.enable_thinking = normalize_enable_thinking(args.enable_thinking)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
+    tokenizer_path = args.tokenizer_path or args.model_path
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -214,7 +216,7 @@ def main() -> None:
     from vllm import LLM
     llm = LLM(
         model=args.model_path,
-        tokenizer=args.model_path,
+        tokenizer=tokenizer_path,
         tensor_parallel_size=max(1, int(args.tensor_parallel_size)),
         gpu_memory_utilization=float(args.gpu_memory_utilization),
         dtype=str(args.dtype),
