@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=eval_qwen3_1d7b_global_step_0
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh-dev
-#SBATCH --nodes=2
+#SBATCH --partition=gh
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=00:30:00
-#SBATCH --output=test.out
-#SBATCH --error=test.err
+#SBATCH --time=02:30:00
+#SBATCH --output=slurm-%j_eval_qwen3_1d7b_global_step_0.out
+#SBATCH --error=slurm-%j_eval_qwen3_1d7b_global_step_0.err
 
 set -euo pipefail
 

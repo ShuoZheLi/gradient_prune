@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=eval_qwen3_4b_global_step_550
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh-dev
-#SBATCH --nodes=4
+#SBATCH --partition=gh
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=2:00:00
+#SBATCH --time=02:30:00
 #SBATCH --output=slurm-%j_eval_qwen3_4b_global_step_550.out
 #SBATCH --error=slurm-%j_eval_qwen3_4b_global_step_550.err
 
