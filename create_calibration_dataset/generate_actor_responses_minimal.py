@@ -39,6 +39,7 @@ def resolve_actor_hf_dir(checkpoint_dir: str | Path, *, skip_merge: bool = False
     checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()
     candidates = [
         checkpoint_dir / "merged_hf" / "actor",
+        checkpoint_dir / "merged_hf",
         checkpoint_dir / "actor",
         checkpoint_dir,
     ]
@@ -46,8 +47,12 @@ def resolve_actor_hf_dir(checkpoint_dir: str | Path, *, skip_merge: bool = False
         if has_hf_checkpoint(candidate):
             return candidate
 
-    actor_fsdp_dir = checkpoint_dir / "actor"
-    if not any(actor_fsdp_dir.glob("model_world_size_*_rank_*.pt")):
+    fsdp_candidates = [checkpoint_dir / "actor", checkpoint_dir]
+    actor_fsdp_dir = next(
+        (candidate for candidate in fsdp_candidates if any(candidate.glob("model_world_size_*_rank_*.pt"))),
+        None,
+    )
+    if actor_fsdp_dir is None:
         tried = "\n".join(str(path) for path in candidates)
         raise FileNotFoundError(f"No actor HF checkpoint or FSDP shards found. Tried:\n{tried}")
     if skip_merge:
@@ -70,7 +75,7 @@ def resolve_actor_hf_dir(checkpoint_dir: str | Path, *, skip_merge: bool = False
     hf_config_dir = actor_fsdp_dir / "huggingface"
     if (hf_config_dir / "config.json").is_file():
         cmd.extend(["--hf_model_config_path", str(hf_config_dir)])
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
     if not has_hf_checkpoint(target_dir):
         raise RuntimeError(f"Merge completed but no HF actor checkpoint was found at {target_dir}")
     return target_dir
