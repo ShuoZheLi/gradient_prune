@@ -1,6 +1,25 @@
 #!/bin/bash
 set -euo pipefail
 
+experiment_start_epoch=$(date +%s)
+format_duration() {
+  local total_seconds="$1"
+  local hours=$((total_seconds / 3600))
+  local minutes=$(((total_seconds % 3600) / 60))
+  local seconds=$((total_seconds % 60))
+  printf '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
+}
+print_elapsed_time() {
+  local status="$?"
+  local experiment_end_epoch elapsed
+  experiment_end_epoch=$(date +%s)
+  elapsed=$((experiment_end_epoch - experiment_start_epoch))
+  echo "[eval] total_elapsed_seconds=$elapsed"
+  echo "[eval] total_elapsed_time=$(format_duration "$elapsed")"
+  exit "$status"
+}
+trap print_elapsed_time EXIT
+
 # Common evaluator for SFT Qwen3-1.7B checkpoints.
 # Submit one of the eval_global_step_*.sh wrappers with sbatch.
 
@@ -443,6 +462,9 @@ num_responses = int(sys.argv[4])
 
 scores = []
 correct = []
+response_lengths = []
+correct_response_lengths = []
+wrong_response_lengths = []
 num_examples = 0
 num_generations = 0
 num_scored = 0
@@ -461,11 +483,18 @@ with responses_path.open("r", encoding="utf-8") as handle:
         if not line.strip():
             continue
         row = json.loads(line)
+        response_text = row.get("response") or ""
+        response_length = len(response_text)
+        response_lengths.append(response_length)
         if row.get("task_score") is not None:
             score = float(row.get("task_score", 0.0))
             is_correct = bool(row.get("is_correct", score == 1.0))
             scores.append(score)
             correct.append(is_correct)
+            if is_correct:
+                correct_response_lengths.append(response_length)
+            else:
+                wrong_response_lengths.append(response_length)
             prompt_id = row.get("example_id")
             prompt_has_correct[prompt_id] = bool(prompt_has_correct.get(prompt_id, False) or is_correct)
 
@@ -489,6 +518,14 @@ if scores:
         "score_sum": sum(scores),
         "num_correct": num_correct,
     })
+metrics.update({
+    "avg_response_length_chars": sum(response_lengths) / len(response_lengths) if response_lengths else None,
+    "avg_correct_response_length_chars": sum(correct_response_lengths) / len(correct_response_lengths) if correct_response_lengths else None,
+    "avg_wrong_response_length_chars": sum(wrong_response_lengths) / len(wrong_response_lengths) if wrong_response_lengths else None,
+    "num_responses_for_length": len(response_lengths),
+    "num_correct_responses_for_length": len(correct_response_lengths),
+    "num_wrong_responses_for_length": len(wrong_response_lengths),
+})
 metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY_AGGREGATE_METRICS
 
