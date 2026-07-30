@@ -90,9 +90,9 @@ mkdir -p "$LOG_DIR" "$TRAIN_LOG_DIR" "$ARCHIVE_ROOT"
 # -----------------------------
 # Defaults target Qwen3-8B WANDA-pruned sparse SFT on the full 5-response x 7500 math dataset.
 train_batch_size=${train_batch_size:-128}
-micro_batch_size_per_gpu=${micro_batch_size_per_gpu:-2}
+micro_batch_size_per_gpu=${micro_batch_size_per_gpu:-1}
 max_length=${max_length:-18432}
-max_token_len_per_gpu=${max_token_len_per_gpu:-36864}
+max_token_len_per_gpu=${max_token_len_per_gpu:-18432}
 truncation=${truncation:-error}
 lr=${lr:-5e-6}
 total_epochs=${total_epochs:-5}
