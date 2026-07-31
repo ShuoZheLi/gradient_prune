@@ -69,7 +69,7 @@ MATH_500_EVAL_FILE="${MATH_500_EVAL_FILE:-${VAL_FILE}}"
 AIME_24_25_26_EVAL_FILE="${AIME_24_25_26_EVAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/aime_24_25_26.parquet}"
 PRUNING_SPARSITY="${PRUNING_SPARSITY:-0.7552}"
 SCORE_ROOT="${SCORE_ROOT:-/scratch/09576/shuozhe/gradient_prune/results/qwen3_8b_magnitude_math7500/scores}"
-PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-}"
+PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-magnitude}"
 DRY_RUN="${DRY_RUN:-0}"
 
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
