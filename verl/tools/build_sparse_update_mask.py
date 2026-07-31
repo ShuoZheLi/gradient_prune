@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--mode", default="safe_svd_lowmag")
     parser.add_argument("--wanda_score_dir", default=None, help="Directory produced by gradient_prune/scripts/score_wanda.py.")
+    parser.add_argument("--score_key", default=None, help="Tensor key to load from each score file; inferred from metadata when unset.")
     parser.add_argument("--sparsity", type=float, default=None, help="Pruning sparsity for WANDA-score masks; keep_fraction = 1 - sparsity.")
     parser.add_argument("--keep_fraction", type=float, default=None, help="Fraction of target weights to keep trainable for WANDA-score masks.")
     parser.add_argument("--rank_k", type=int, default=128)
@@ -44,6 +45,7 @@ def main():
         "target_modules": [item for item in args.target_modules.split(",") if item],
         "exclude_keywords": [item for item in args.exclude_keywords.split(",") if item],
         "apply_to_bias": False,
+        "score_key": args.score_key,
         "svd_device": args.svd_device,
         "dry_run_log_only": args.dry_run,
     }

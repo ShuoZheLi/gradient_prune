@@ -96,7 +96,7 @@ def keep_fraction_mask_from_scores(scores: torch.Tensor, keep_fraction: float) -
     return top_fraction_mask(scores.detach().float(), keep_fraction)
 
 
-def _load_score_metadata(score_dir: str | os.PathLike[str]) -> tuple[str, dict[str, str], dict[str, Any]]:
+def _load_score_metadata(score_dir: str | os.PathLike[str], score_key_override: Optional[str] = None) -> tuple[str, dict[str, str], dict[str, Any]]:
     score_dir = os.fspath(score_dir)
     metadata_path = os.path.join(score_dir, "metadata.json")
     if not os.path.isfile(metadata_path):
@@ -106,7 +106,8 @@ def _load_score_metadata(score_dir: str | os.PathLike[str]) -> tuple[str, dict[s
     modules = metadata.get("modules")
     if not isinstance(modules, Mapping) or not modules:
         raise ValueError(f"Invalid WANDA score metadata {metadata_path}: missing non-empty 'modules' mapping")
-    score_key = str(metadata.get("score_key", "wanda"))
+    metadata_score_key = metadata.get("score_key")
+    score_key = score_key_override or (str(metadata_score_key) if metadata_score_key is not None else "wanda")
     return score_key, {str(name): str(file_name) for name, file_name in modules.items()}, metadata
 
 
@@ -151,7 +152,8 @@ def build_masks_from_wanda_scores(
     target_modules = _as_list(_cfg_get(config, "target_modules", DEFAULT_TARGET_MODULES), DEFAULT_TARGET_MODULES)
     exclude_keywords = _as_list(_cfg_get(config, "exclude_keywords", DEFAULT_EXCLUDE_KEYWORDS), DEFAULT_EXCLUDE_KEYWORDS)
     apply_to_bias = bool(_cfg_get(config, "apply_to_bias", False))
-    score_key, score_index, score_metadata = _load_score_metadata(score_dir)
+    score_key_override = _cfg_get(config, "score_key", None)
+    score_key, score_index, score_metadata = _load_score_metadata(score_dir, score_key_override)
     masks: dict[str, torch.BoolTensor] = {}
     missing_scores: list[str] = []
     shape_mismatches: list[dict[str, Any]] = []

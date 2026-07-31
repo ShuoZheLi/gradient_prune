@@ -381,16 +381,44 @@ build_sparse_update_mask() {
     exit 3
   fi
 
+  MASK_SCORE_ROOT="$SCORE_ROOT"
+  if [[ -n "$PRUNE_SCORE_KEY" ]]; then
+    MASK_SCORE_ROOT="${RUN_DIR}/score_metadata/${PRUNE_SCORE_KEY}"
+    mkdir -p "$MASK_SCORE_ROOT"
+    python3 - "$SCORE_ROOT" "$MASK_SCORE_ROOT" "$PRUNE_SCORE_KEY" <<'PY'
+import json
+import os
+import sys
+
+score_root, output_root, score_key = sys.argv[1:]
+metadata_path = os.path.join(score_root, "metadata.json")
+with open(metadata_path, encoding="utf-8") as handle:
+    metadata = json.load(handle)
+modules = metadata.get("modules")
+if not isinstance(modules, dict) or not modules:
+    raise SystemExit(f"Invalid score metadata: missing non-empty modules mapping in {metadata_path}")
+metadata["score_key"] = score_key
+metadata["modules"] = {
+    name: file_name if os.path.isabs(str(file_name)) else os.path.join(score_root, str(file_name))
+    for name, file_name in modules.items()
+}
+with open(os.path.join(output_root, "metadata.json"), "w", encoding="utf-8") as handle:
+    json.dump(metadata, handle, indent=2, default=str)
+PY
+  fi
+
   mkdir -p "$(dirname "$SPARSE_MASK_PATH")"
   echo "Building sparse-update magnitude mask"
   echo "  model: $MODEL_PATH"
   echo "  score root: $SCORE_ROOT"
+  echo "  mask score root: $MASK_SCORE_ROOT"
+  echo "  score key: $PRUNE_SCORE_KEY"
   echo "  sparsity: $PRUNING_SPARSITY"
   echo "  output: $SPARSE_MASK_PATH"
   python3 "$WORK_DIR/tools/build_sparse_update_mask.py" \
     --model_name_or_path "$MODEL_PATH" \
     --output_path "$SPARSE_MASK_PATH" \
-    --wanda_score_dir "$SCORE_ROOT" \
+    --wanda_score_dir "$MASK_SCORE_ROOT" \
     --sparsity "$PRUNING_SPARSITY" \
     --mode wanda_top
 }
