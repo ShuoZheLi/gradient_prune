@@ -92,10 +92,10 @@ save_initial_checkpoint=${save_initial_checkpoint:-True}
 num_workers=${num_workers:-8}
 
 # eval_method: loss, generation_reward, or both.
-eval_method=${eval_method:-generation_reward}
-eval_before_train=${eval_before_train:-False}
+eval_method=${eval_method:-loss}
+eval_before_train=${eval_before_train:-True}
 eval_freq=${eval_freq:--1}
-loss_eval_freq=${loss_eval_freq:--1}
+loss_eval_freq=${loss_eval_freq:-50}
 generation_eval_freq=${generation_eval_freq:--1}
 
 # loss_eval_files must be SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
