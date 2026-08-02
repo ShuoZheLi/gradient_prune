@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -102,6 +102,45 @@ def load_examples(path: str | Path, tokenizer, *, prompt_key: str, response_key:
 
 def score_response(example: ExampleRecord, response_text: str, reward_score_dir: str | Path | None = None) -> float:
     return score_task_example_response(example.data_source, response_text, example.ground_truth, reward_score_dir=reward_score_dir)
+
+
+def _load_tokenizer(tokenizer_path: str | Path) -> PreTrainedTokenizerBase:
+    load_errors: list[str] = []
+    for use_fast in (False, True):
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=use_fast, trust_remote_code=True)
+        except Exception as exc:
+            load_errors.append(f"use_fast={use_fast}: {type(exc).__name__}: {exc}")
+            continue
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
+            if use_fast and load_errors:
+                print(f"[vllm] slow tokenizer failed; using fast tokenizer for {tokenizer_path}")
+            return tokenizer
+        load_errors.append(f"use_fast={use_fast}: expected tokenizer object, got {type(tokenizer).__name__} ({tokenizer!r})")
+    raise RuntimeError(f"Could not load a valid tokenizer from {tokenizer_path}. Attempts: {'; '.join(load_errors)}")
+
+
+def _config_pad_token_id(tokenizer_path: str | Path) -> int | None:
+    config_path = Path(tokenizer_path).expanduser() / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        pad_token_id = json.loads(config_path.read_text(encoding="utf-8")).get("pad_token_id")
+    except Exception:
+        return None
+    return pad_token_id if isinstance(pad_token_id, int) else None
+
+
+def _ensure_pad_token(tokenizer: PreTrainedTokenizerBase, tokenizer_path: str | Path) -> None:
+    if tokenizer.pad_token_id is not None:
+        return
+    pad_token_id = _config_pad_token_id(tokenizer_path)
+    if pad_token_id is not None:
+        pad_token = tokenizer.convert_ids_to_tokens(pad_token_id)
+        if isinstance(pad_token, str):
+            tokenizer.pad_token = pad_token
+            return
+    tokenizer.pad_token = tokenizer.eos_token
 
 
 def parse_args() -> argparse.Namespace:
@@ -197,9 +236,8 @@ def main() -> None:
     args = parse_args()
     args.enable_thinking = normalize_enable_thinking(args.enable_thinking)
     tokenizer_path = args.tokenizer_path or args.model_path
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = _load_tokenizer(tokenizer_path)
+    _ensure_pad_token(tokenizer, tokenizer_path)
     tokenizer.padding_side = "left"
     examples = load_examples(
         args.dataset_path,
