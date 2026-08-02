@@ -80,7 +80,7 @@ mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$ARCHIVE_ROOT"
 # -----------------------------
 batch_size="${batch_size:-1}"
 max_length="${max_length:-14336}"
-truncation="${truncation:-error}"
+truncation="${truncation:-right}"
 max_samples="${max_samples:--1}"
 only_correct="${only_correct:-true}"
 prompt_key="${prompt_key:-prompt}"

@@ -36,9 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=14336)
     parser.add_argument(
         "--truncation",
-        choices=("left", "error"),
-        default="error",
-        help="left keeps the end of prompt+response; error rejects overlength examples.",
+        choices=("left", "right", "error"),
+        default="right",
+        help=(
+            "right keeps the start of prompt+response and drops tokens from the end; "
+            "left keeps the end and drops tokens from the start; error rejects overlength examples."
+        ),
     )
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, etc.")
     parser.add_argument("--dtype", default="auto", choices=("auto", "float32", "float16", "bfloat16"))
@@ -213,21 +216,29 @@ def build_features(rows: list[dict[str, Any]], tokenizer, max_length: int, trunc
             raise ValueError(f"Empty response after tokenization at row_position={item['row_position']}")
         full_ids = prompt_ids + response_ids
         prompt_len_after_trunc = len(prompt_ids)
-        truncated_tokens = 0
+        truncated_left_tokens = 0
+        truncated_right_tokens = 0
         if len(full_ids) > max_length:
             if truncation == "error":
                 raise ValueError(
                     f"Example row_position={item['row_position']} has {len(full_ids)} tokens > max_length={max_length}"
                 )
-            truncated_tokens = len(full_ids) - max_length
-            full_ids = full_ids[-max_length:]
-            prompt_len_after_trunc = max(0, len(prompt_ids) - truncated_tokens)
+            if truncation == "left":
+                truncated_left_tokens = len(full_ids) - max_length
+                full_ids = full_ids[-max_length:]
+                prompt_len_after_trunc = max(0, len(prompt_ids) - truncated_left_tokens)
+            elif truncation == "right":
+                truncated_right_tokens = len(full_ids) - max_length
+                full_ids = full_ids[:max_length]
+                prompt_len_after_trunc = min(len(prompt_ids), len(full_ids))
+            else:
+                raise ValueError(f"Unsupported truncation mode: {truncation}")
         labels = [IGNORE_INDEX] * prompt_len_after_trunc + full_ids[prompt_len_after_trunc:]
         response_token_count = sum(label != IGNORE_INDEX for label in labels)
         if response_token_count <= 0:
             raise ValueError(
                 f"Example row_position={item['row_position']} lost all response tokens after truncation; "
-                f"increase --max-length."
+                f"increase --max-length or use a different --truncation mode."
             )
         features.append(
             {
@@ -239,7 +250,8 @@ def build_features(rows: list[dict[str, Any]], tokenizer, max_length: int, trunc
                 "response_tokens_scored": response_token_count,
                 "total_tokens_raw": len(prompt_ids) + len(response_ids),
                 "total_tokens_scored_input": len(full_ids),
-                "truncated_left_tokens": truncated_tokens,
+                "truncated_left_tokens": truncated_left_tokens,
+                "truncated_right_tokens": truncated_right_tokens,
             }
         )
     return features
@@ -301,6 +313,7 @@ def evaluate(model, tokenizer, features: list[dict[str, Any]], *, device: str, b
                         "total_tokens_raw": item["total_tokens_raw"],
                         "total_tokens_scored_input": item["total_tokens_scored_input"],
                         "truncated_left_tokens": item["truncated_left_tokens"],
+                        "truncated_right_tokens": item["truncated_right_tokens"],
                         "perplexity": math.exp(nll) if nll < 50 else float("inf"),
                         "is_correct": item["is_correct"],
                         "task_score": item["task_score"],
