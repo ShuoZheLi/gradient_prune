@@ -5,7 +5,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=03:30:00
+#SBATCH --time=03:00:00
 #SBATCH --output=sft_qwen3_4b_base_deepseek_r1_distill_llama_8b_5x7500-%j.out
 #SBATCH --error=sft_qwen3_4b_base_deepseek_r1_distill_llama_8b_5x7500-%j.err
 
