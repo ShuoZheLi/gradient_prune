@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=collect_nemotron_nano_9b_v2_math7500_n5
-#SBATCH --account=ASC24079
+#SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1

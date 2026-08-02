@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=collect_deepseek_r1_llama8b_math7500_n5
-#SBATCH --account=ASC24079
+#SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
