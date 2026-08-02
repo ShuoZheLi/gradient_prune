@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
-#SBATCH --time=6:00:00
+#SBATCH --time=3:00:00
 #SBATCH --output=slurm-%j_collect_nemotron_nano_9b_v2_math7500_n5.out
 #SBATCH --error=slurm-%j_collect_nemotron_nano_9b_v2_math7500_n5.err
 
