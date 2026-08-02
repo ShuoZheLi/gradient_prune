@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=nll_qwen3_8b_wanda_s0d4241
+#SBATCH --job-name=nll_qwen3_4b_deepseek
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
 #SBATCH --time=02:00:00
-#SBATCH --output=nll_qwen3_8b_wanda_s0d4241_5x7500-%j.out
-#SBATCH --error=nll_qwen3_8b_wanda_s0d4241_5x7500-%j.err
+#SBATCH --output=nll_qwen3_4b_base_global_step_0_deepseek_r1_distill_llama_8b_5x7500-%j.out
+#SBATCH --error=nll_qwen3_4b_base_global_step_0_deepseek_r1_distill_llama_8b_5x7500-%j.err
 
 set -euo pipefail
 
@@ -58,17 +58,14 @@ python3 -V
 # -----------------------------
 # Run identity and paths
 # -----------------------------
-RUN_NAME="${RUN_NAME:-nll_qwen3_8b_wanda_s0d4241_base_5x7500}"
+RUN_NAME="${RUN_NAME:-nll_qwen3_4b_base_global_step_0_deepseek_r1_distill_llama_8b_5x7500}"
 REAL_SLURM_JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
 WORK_DIR="${WORK_DIR:-/work/09576/shuozhe/gradient_prune/verl}"
 REPO_DIR="${REPO_DIR:-/work/09576/shuozhe/gradient_prune}"
-MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
-DATA_FILE="${DATA_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
-PRUNING_SPARSITY="${PRUNING_SPARSITY:-0.4241}"
-SCORE_ROOT="${SCORE_ROOT:-${SCRATCH}/gradient_prune/results/qwen3_8b_wanda_math7500/scores}"
-PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-}"
+MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/work2/09576/shuozhe/saved_model/Qwen3-4B-Base}"
+DATA_FILE="${DATA_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/deepseek-r1-distill-llama-8b_math7500_correct_5_response/deepseek-r1-distill-llama-8b_math7500_correct_5_response.parquet}"
 DRY_RUN="${DRY_RUN:-0}"
 
 export PYTHONPATH="${WORK_DIR}:${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -77,7 +74,6 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH}/verl_runs}"
 RUN_DIR="${SCRATCH_ROOT}/${RUN_ID}"
 LOG_DIR="${RUN_DIR}/logs"
 OUTPUT_DIR="${OUTPUT_DIR:-${RUN_DIR}/teacher_trajectory_nll}"
-SPARSE_MASK_PATH="${SPARSE_MASK_PATH:-${RUN_DIR}/sparse_update_masks/wanda_s${PRUNING_SPARSITY}.pt}"
 ARCHIVE_ROOT="${ARCHIVE_ROOT:-/work/09576/shuozhe/gradient_prune/verl/train_log_archive}"
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 STDOUT_LOG="${LOG_DIR}/job_${RUN_ID}.txt"
@@ -98,11 +94,9 @@ device="${device:-auto}"
 dtype="${dtype:-auto}"
 trust_remote_code="${trust_remote_code:-false}"
 attn_implementation="${attn_implementation:-}"
-
-# Same sparse-update semantics as SFT: WANDA top-score entries are kept; all other entries are zeroed before NLL.
-sparse_update_enabled="${sparse_update_enabled:-true}"
-sparse_zero_frozen_params="${sparse_zero_frozen_params:-true}"
 strict_mask="${strict_mask:-true}"
+
+# This launcher intentionally measures the dense standalone 4B model; no pruning mask or score file is used.
 
 # -----------------------------
 # Helpers
@@ -142,53 +136,6 @@ describe_path() {
   fi
 }
 
-build_sparse_update_mask() {
-  if [[ "$sparse_update_enabled" != "true" && "$sparse_update_enabled" != "True" ]]; then
-    echo "Sparse update disabled; measuring dense model."
-    return 0
-  fi
-
-  if [[ "$sparse_zero_frozen_params" != "true" && "$sparse_zero_frozen_params" != "True" ]]; then
-    echo "sparse_zero_frozen_params=$sparse_zero_frozen_params; no pruning will be applied for NLL."
-    return 0
-  fi
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "DRY_RUN=1; skipping WANDA mask build. Planned mask path: $SPARSE_MASK_PATH"
-    return 0
-  fi
-
-  if [[ -f "$SPARSE_MASK_PATH" ]]; then
-    echo "Reusing sparse-update mask: $SPARSE_MASK_PATH"
-    return 0
-  fi
-
-  if [[ ! -f "$SCORE_ROOT/metadata.json" ]]; then
-    echo "WANDA score root does not contain metadata.json: $SCORE_ROOT" >&2
-    echo "Set SCORE_ROOT=/path/to/scores, or set sparse_update_enabled=false for dense NLL." >&2
-    exit 3
-  fi
-
-  mkdir -p "$(dirname "$SPARSE_MASK_PATH")"
-  echo "Building sparse-update WANDA mask"
-  echo "  model: $MODEL_PATH"
-  echo "  score root: $SCORE_ROOT"
-  echo "  score key: ${PRUNE_SCORE_KEY:-<metadata/default>}"
-  echo "  sparsity: $PRUNING_SPARSITY"
-  echo "  output: $SPARSE_MASK_PATH"
-  mask_args=(
-    --model_name_or_path "$MODEL_PATH"
-    --output_path "$SPARSE_MASK_PATH"
-    --wanda_score_dir "$SCORE_ROOT"
-    --sparsity "$PRUNING_SPARSITY"
-    --mode wanda_top
-  )
-  if [[ -n "$PRUNE_SCORE_KEY" ]]; then
-    mask_args+=(--score_key "$PRUNE_SCORE_KEY")
-  fi
-  python3 "$WORK_DIR/tools/build_sparse_update_mask.py" "${mask_args[@]}"
-}
-
 sync_to_work() {
   echo "Syncing NLL outputs/logs back to archive."
   mkdir -p "$ARCHIVE_DIR"
@@ -214,7 +161,6 @@ on_exit() {
 trap on_exit EXIT
 
 MODEL_PATH="$(resolve_model_init_path "$MODEL_INIT_CKPT" actor)"
-build_sparse_update_mask
 
 # -----------------------------
 # Debug info and input checks
@@ -231,13 +177,7 @@ describe_path "REPO_DIR" "$REPO_DIR"
 describe_path "MODEL_INIT_CKPT" "$MODEL_INIT_CKPT"
 describe_path "MODEL_PATH" "$MODEL_PATH"
 describe_path "DATA_FILE" "$DATA_FILE"
-describe_path "SCORE_ROOT" "$SCORE_ROOT"
-echo "PRUNING_SPARSITY: $PRUNING_SPARSITY"
-echo "SPARSE_MASK_PATH: $SPARSE_MASK_PATH"
-echo "PRUNE_SCORE_KEY: ${PRUNE_SCORE_KEY:-<metadata/default>}"
-echo "sparse_update_enabled: $sparse_update_enabled"
-echo "sparse_zero_frozen_params: $sparse_zero_frozen_params"
-echo "strict_mask: $strict_mask"
+echo "pruning: disabled"
 echo "batch_size: $batch_size"
 echo "max_length: $max_length"
 echo "truncation: $truncation"
@@ -246,9 +186,6 @@ echo "only_correct: $only_correct"
 
 ls -ld "$WORK_DIR" "$REPO_DIR"
 ls -lh "$DATA_FILE"
-if [[ "$sparse_update_enabled" == "true" || "$sparse_update_enabled" == "True" ]]; then
-  ls -lh "$SPARSE_MASK_PATH" || true
-fi
 
 EVAL_SCRIPT="${EVAL_SCRIPT:-${REPO_DIR}/src/measure_teacher_trajectory_nll.py}"
 NLL_ARGS=(
@@ -278,13 +215,6 @@ if [[ "$trust_remote_code" == "true" || "$trust_remote_code" == "True" ]]; then
 fi
 if [[ -n "$attn_implementation" ]]; then
   NLL_ARGS+=(--attn-implementation "$attn_implementation")
-fi
-if [[ "$sparse_update_enabled" == "true" || "$sparse_update_enabled" == "True" ]]; then
-  if [[ "$sparse_zero_frozen_params" == "true" || "$sparse_zero_frozen_params" == "True" ]]; then
-    NLL_ARGS+=(--mask-path "$SPARSE_MASK_PATH" --apply-pruning)
-  else
-    NLL_ARGS+=(--no-apply-pruning)
-  fi
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then

@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=nll_qwen3_8b_wanda_s0d4241
+#SBATCH --job-name=nll_8b_wanda_deepseek
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
 #SBATCH --time=02:00:00
-#SBATCH --output=nll_qwen3_8b_wanda_s0d4241_5x7500-%j.out
-#SBATCH --error=nll_qwen3_8b_wanda_s0d4241_5x7500-%j.err
+#SBATCH --output=nll_qwen3_8b_wanda_s0d4241_deepseek_r1_distill_llama_8b_5x7500-%j.out
+#SBATCH --error=nll_qwen3_8b_wanda_s0d4241_deepseek_r1_distill_llama_8b_5x7500-%j.err
 
 set -euo pipefail
 
@@ -58,14 +58,14 @@ python3 -V
 # -----------------------------
 # Run identity and paths
 # -----------------------------
-RUN_NAME="${RUN_NAME:-nll_qwen3_8b_wanda_s0d4241_base_5x7500}"
+RUN_NAME="${RUN_NAME:-nll_qwen3_8b_wanda_s0d4241_deepseek_r1_distill_llama_8b_5x7500}"
 REAL_SLURM_JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
 WORK_DIR="${WORK_DIR:-/work/09576/shuozhe/gradient_prune/verl}"
 REPO_DIR="${REPO_DIR:-/work/09576/shuozhe/gradient_prune}"
 MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
-DATA_FILE="${DATA_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
+DATA_FILE="${DATA_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/deepseek-r1-distill-llama-8b_math7500_correct_5_response/deepseek-r1-distill-llama-8b_math7500_correct_5_response.parquet}"
 PRUNING_SPARSITY="${PRUNING_SPARSITY:-0.4241}"
 SCORE_ROOT="${SCORE_ROOT:-${SCRATCH}/gradient_prune/results/qwen3_8b_wanda_math7500/scores}"
 PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-}"

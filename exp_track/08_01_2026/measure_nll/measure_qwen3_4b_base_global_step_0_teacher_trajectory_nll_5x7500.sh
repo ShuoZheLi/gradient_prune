@@ -11,6 +11,15 @@
 
 set -euo pipefail
 
+experiment_start_epoch=$(date +%s)
+format_duration() {
+  local total_seconds="$1"
+  local hours=$((total_seconds / 3600))
+  local minutes=$(((total_seconds % 3600) / 60))
+  local seconds=$((total_seconds % 60))
+  printf '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
+}
+
 # -----------------------------
 # Environment setup
 # -----------------------------
@@ -138,7 +147,18 @@ sync_to_work() {
 cleanup() {
   sync_to_work
 }
-trap cleanup EXIT
+
+on_exit() {
+  local status="$?"
+  cleanup || true
+  local experiment_end_epoch elapsed
+  experiment_end_epoch=$(date +%s)
+  elapsed=$((experiment_end_epoch - experiment_start_epoch))
+  echo "[nll] total_elapsed_seconds=$elapsed"
+  echo "[nll] total_elapsed_time=$(format_duration "$elapsed")"
+  exit "$status"
+}
+trap on_exit EXIT
 
 MODEL_PATH="$(resolve_model_init_path "$MODEL_INIT_CKPT" actor)"
 
