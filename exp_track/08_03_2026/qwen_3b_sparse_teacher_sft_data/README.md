@@ -5,13 +5,13 @@ This folder contains a wrapper to collect Math7500 correct 5-response SFT data f
 ## Main Script
 
 ```bash
-sbatch /data/shuozhe/gradient_prune/exp_track/08_03_2026/qwen_3b_sparse_teacher_sft_data/collect_qwen3_sparse_wanda_s0d5_math7500_multi_node_5_response.sh
+sbatch collect_qwen3_sparse_wanda_s0d5_math7500_multi_node_5_response.sh
 ```
 
 or:
 
 ```bash
-/data/shuozhe/gradient_prune/exp_track/08_03_2026/qwen_3b_sparse_teacher_sft_data/submit_collect_qwen3_sparse_wanda_s0d5_math7500_multi_node_5_response.sh
+submit_collect_qwen3_sparse_wanda_s0d5_math7500_multi_node_5_response.sh
 ```
 
 ## What It Does
