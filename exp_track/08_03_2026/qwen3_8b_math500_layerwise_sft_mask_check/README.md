@@ -24,13 +24,9 @@ or:
 
 ## Overrides Applied
 
-The wrapper executes the original 07/21 script:
+The main script is self-contained and does not call any previous `exp_track` shell script.
 
-```text
-/data/shuozhe/gradient_prune/exp_track/07_21_2026/qwen3_8b_math500/qwen3_8b_wanda_math500_response_analysis_multi_node_sparsity_0d5.sh
-```
-
-with these defaults:
+It bakes in the same response-analysis workflow with these diagnostic defaults:
 
 ```bash
 PRUNING_SPARSITY=0.5
