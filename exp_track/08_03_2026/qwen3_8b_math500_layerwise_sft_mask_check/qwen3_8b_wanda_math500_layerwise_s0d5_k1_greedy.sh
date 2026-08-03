@@ -5,7 +5,7 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=6:00:00
+#SBATCH --time=2:30:00
 #SBATCH --output=slurm-%j_qwen3_8b_math500_layer_s0d5_k1.out
 #SBATCH --error=slurm-%j_qwen3_8b_math500_layer_s0d5_k1.err
 
