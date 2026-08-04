@@ -1,25 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=fix_qwen3_sparse_s0d1_n5
-#SBATCH --account=ASC26008
-#SBATCH --partition=gg
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --time=00:30:00
-#SBATCH --output=slurm-%j_fix_qwen3_sparse_s0d1_n5.out
-#SBATCH --error=slurm-%j_fix_qwen3_sparse_s0d1_n5.err
-
 set -euo pipefail
 
 # Recover the final parquet files from an already-completed raw response file.
 # This script intentionally does not launch generation and does not delete shards
 # or raw outputs, so it is safe to run after the original collection job timed out
 # during final postprocessing.
-
-if command -v module >/dev/null 2>&1; then
-  module reset
-  module load nvidia/25.9
-fi
+# Run directly on a login/CPU node, for example:
+#   ./fix_qwen3_sparse_wanda_s0d1_math7500_postprocess_5_response.sh
 
 VENV="${VENV:-/work/09576/shuozhe/verl_setup_tacc/.venv}"
 if [[ -d "$VENV" ]]; then
@@ -127,10 +114,12 @@ fi
   --correct_jsonl "$CORRECT_JSONL" \
   --calib_parquet "$CALIB_PARQUET" \
   --metrics_json "$METRICS_JSON" \
-  --num_responses_per_prompt "$NUM_RESPONSES_PER_PROMPT" <<'PY'
+  --num_responses_per_prompt "$NUM_RESPONSES_PER_PROMPT" \
+  --expected_total "$raw_lines" <<'PY'
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -150,7 +139,25 @@ parser.add_argument("--correct_jsonl", required=True)
 parser.add_argument("--calib_parquet", required=True)
 parser.add_argument("--metrics_json", required=True)
 parser.add_argument("--num_responses_per_prompt", type=int, default=1)
+parser.add_argument("--expected_total", type=int, default=0)
 args = parser.parse_args()
+
+
+def print_progress(current: int, total: int, label: str = "tokenizing"):
+    if total > 0:
+        width = 40
+        filled = min(width, int(width * current / total))
+        bar = "#" * filled + "-" * (width - filled)
+        percent = 100.0 * current / total
+        sys.stderr.write(f"\r[fix] {label} [{bar}] {current}/{total} ({percent:5.1f}%)")
+    else:
+        sys.stderr.write(f"\r[fix] {label} {current} rows")
+    sys.stderr.flush()
+
+
+def finish_progress():
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
 raw_path = Path(args.raw_jsonl).expanduser()
 all_jsonl_path = Path(args.all_trajectories_jsonl).expanduser()
@@ -177,10 +184,12 @@ correct_rows = []
 prompt_correct = {}
 num_total = 0
 num_scored = 0
+progress_interval = max(1, args.expected_total // 200) if args.expected_total else 100
 all_jsonl_tmp = Path(f"{all_jsonl_path}.tmp")
 correct_tmp = Path(f"{correct_path}.tmp")
 
 with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_tmp.open("w", encoding="utf-8") as all_file, correct_tmp.open("w", encoding="utf-8") as correct_file:
+    print_progress(0, args.expected_total)
     for line in input_file:
         if not line.strip():
             continue
@@ -214,6 +223,11 @@ with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_tmp.open("w",
             prompt_correct[row.get("example_id")] = True
             correct_rows.append(out_row)
             correct_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+        if num_total % progress_interval == 0:
+            print_progress(num_total, args.expected_total)
+
+print_progress(num_total, args.expected_total)
+finish_progress()
 
 if not correct_rows:
     raise SystemExit("No correct trajectories were collected; inspect raw responses before using this dataset.")
@@ -222,7 +236,9 @@ all_parquet_tmp = all_parquet_path.with_name(f".{all_parquet_path.name}.tmp.parq
 calib_parquet_tmp = parquet_path.with_name(f".{parquet_path.name}.tmp.parquet")
 metrics_tmp = Path(f"{metrics_path}.tmp")
 
+print("[fix] writing all trajectories parquet", flush=True)
 pd.DataFrame(all_rows).to_parquet(all_parquet_tmp, index=False)
+print("[fix] writing correct trajectories parquet", flush=True)
 pd.DataFrame(correct_rows).to_parquet(calib_parquet_tmp, index=False)
 prompt_count = len({row.get("example_id") for row in all_rows})
 metrics = {
@@ -248,6 +264,7 @@ os.replace(correct_tmp, correct_path)
 os.replace(all_parquet_tmp, all_parquet_path)
 os.replace(calib_parquet_tmp, parquet_path)
 os.replace(metrics_tmp, metrics_path)
+print("[fix] finalized output files", flush=True)
 print(json.dumps(metrics, indent=2))
 PY
 
