@@ -122,7 +122,8 @@ import os
 import sys
 from pathlib import Path
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from transformers import AutoTokenizer
 
 from create_calibration_dataset.generate_actor_responses_minimal import resolve_actor_hf_dir
@@ -159,6 +160,7 @@ def finish_progress():
     sys.stderr.write("\n")
     sys.stderr.flush()
 
+
 raw_path = Path(args.raw_jsonl).expanduser()
 all_jsonl_path = Path(args.all_trajectories_jsonl).expanduser()
 all_parquet_path = Path(args.all_trajectories_parquet).expanduser()
@@ -179,78 +181,132 @@ tokenizer = AutoTokenizer.from_pretrained(
 if tokenizer.pad_token_id is None:
     tokenizer.pad_token = tokenizer.eos_token
 
-all_rows = []
-correct_rows = []
-prompt_correct = {}
-num_total = 0
-num_scored = 0
+schema = pa.schema(
+    [
+        ("example_id", pa.int64()),
+        ("response_index", pa.int64()),
+        ("num_responses_per_prompt", pa.int64()),
+        ("prompt", pa.string()),
+        ("response", pa.string()),
+        ("task_score", pa.float64()),
+        ("is_correct", pa.bool_()),
+        ("prompt_generated_trajectory", pa.string()),
+        ("prompt_generated_trajectory_ids", pa.list_(pa.int64())),
+    ]
+)
+
+batch_size = int(os.environ.get("POSTPROCESS_BATCH_SIZE", "512"))
 progress_interval = max(1, args.expected_total // 200) if args.expected_total else 100
 all_jsonl_tmp = Path(f"{all_jsonl_path}.tmp")
 correct_tmp = Path(f"{correct_path}.tmp")
-
-with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_tmp.open("w", encoding="utf-8") as all_file, correct_tmp.open("w", encoding="utf-8") as correct_file:
-    print_progress(0, args.expected_total)
-    for line in input_file:
-        if not line.strip():
-            continue
-        num_total += 1
-        row = json.loads(line)
-        if "is_correct" in row:
-            num_scored += 1
-
-        prompt = row.get("prompt", "")
-        response = row.get("response", "")
-        trajectory = f"{prompt}{response}"
-        trajectory_ids = tokenizer(
-            trajectory,
-            return_attention_mask=False,
-            return_token_type_ids=False,
-        )["input_ids"]
-        out_row = {
-            "example_id": row.get("example_id"),
-            "response_index": row.get("response_index", 0),
-            "num_responses_per_prompt": row.get("num_responses_per_prompt", args.num_responses_per_prompt),
-            "prompt": prompt,
-            "response": response,
-            "task_score": row.get("task_score"),
-            "is_correct": bool(row.get("is_correct", False)),
-            "prompt_generated_trajectory": trajectory,
-            "prompt_generated_trajectory_ids": trajectory_ids,
-        }
-        all_rows.append(out_row)
-        all_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
-        if out_row["is_correct"]:
-            prompt_correct[row.get("example_id")] = True
-            correct_rows.append(out_row)
-            correct_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
-        if num_total % progress_interval == 0:
-            print_progress(num_total, args.expected_total)
-
-print_progress(num_total, args.expected_total)
-finish_progress()
-
-if not correct_rows:
-    raise SystemExit("No correct trajectories were collected; inspect raw responses before using this dataset.")
-
 all_parquet_tmp = all_parquet_path.with_name(f".{all_parquet_path.name}.tmp.parquet")
 calib_parquet_tmp = parquet_path.with_name(f".{parquet_path.name}.tmp.parquet")
 metrics_tmp = Path(f"{metrics_path}.tmp")
 
-print("[fix] writing all trajectories parquet", flush=True)
-pd.DataFrame(all_rows).to_parquet(all_parquet_tmp, index=False)
-print("[fix] writing correct trajectories parquet", flush=True)
-pd.DataFrame(correct_rows).to_parquet(calib_parquet_tmp, index=False)
-prompt_count = len({row.get("example_id") for row in all_rows})
+all_writer = pq.ParquetWriter(all_parquet_tmp, schema)
+correct_writer = pq.ParquetWriter(calib_parquet_tmp, schema)
+all_batch = []
+correct_batch = []
+seen_prompts = set()
+prompt_correct = set()
+num_total = 0
+num_scored = 0
+num_correct = 0
+
+
+def normalize_row(out_row):
+    normalized = dict(out_row)
+    if normalized["example_id"] is not None:
+        normalized["example_id"] = int(normalized["example_id"])
+    normalized["response_index"] = int(normalized["response_index"])
+    normalized["num_responses_per_prompt"] = int(normalized["num_responses_per_prompt"])
+    if normalized["task_score"] is not None:
+        normalized["task_score"] = float(normalized["task_score"])
+    normalized["prompt_generated_trajectory_ids"] = [int(token_id) for token_id in normalized["prompt_generated_trajectory_ids"]]
+    return normalized
+
+
+def write_batch(writer, rows):
+    if not rows:
+        return
+    table = pa.Table.from_pylist(rows, schema=schema)
+    writer.write_table(table)
+    rows.clear()
+
+
+try:
+    with raw_path.open("r", encoding="utf-8") as input_file, all_jsonl_tmp.open("w", encoding="utf-8") as all_file, correct_tmp.open("w", encoding="utf-8") as correct_file:
+        print_progress(0, args.expected_total)
+        for line in input_file:
+            if not line.strip():
+                continue
+            num_total += 1
+            row = json.loads(line)
+            if "is_correct" in row:
+                num_scored += 1
+
+            example_id = row.get("example_id")
+            seen_prompts.add(example_id)
+            prompt = row.get("prompt", "")
+            response = row.get("response", "")
+            trajectory = f"{prompt}{response}"
+            trajectory_ids = tokenizer(
+                trajectory,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+            )["input_ids"]
+            out_row = normalize_row(
+                {
+                    "example_id": example_id,
+                    "response_index": row.get("response_index", 0),
+                    "num_responses_per_prompt": row.get("num_responses_per_prompt", args.num_responses_per_prompt),
+                    "prompt": prompt,
+                    "response": response,
+                    "task_score": row.get("task_score"),
+                    "is_correct": bool(row.get("is_correct", False)),
+                    "prompt_generated_trajectory": trajectory,
+                    "prompt_generated_trajectory_ids": trajectory_ids,
+                }
+            )
+            all_batch.append(out_row)
+            all_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+            if out_row["is_correct"]:
+                prompt_correct.add(example_id)
+                correct_batch.append(out_row)
+                correct_file.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+                num_correct += 1
+
+            if len(all_batch) >= batch_size:
+                write_batch(all_writer, all_batch)
+            if len(correct_batch) >= batch_size:
+                write_batch(correct_writer, correct_batch)
+            if num_total % progress_interval == 0:
+                print_progress(num_total, args.expected_total)
+
+    write_batch(all_writer, all_batch)
+    write_batch(correct_writer, correct_batch)
+finally:
+    all_writer.close()
+    correct_writer.close()
+
+print_progress(num_total, args.expected_total)
+finish_progress()
+
+if not num_correct:
+    raise SystemExit("No correct trajectories were collected; inspect raw responses before using this dataset.")
+
+print("[fix] parquet batches written", flush=True)
+prompt_count = len(seen_prompts)
 metrics = {
     "num_total": num_total,
     "num_prompts": prompt_count,
     "num_responses_per_prompt": args.num_responses_per_prompt,
-    "num_prompts_with_correct_response": sum(1 for value in prompt_correct.values() if value),
-    "prompt_pass_rate": (sum(1 for value in prompt_correct.values() if value) / prompt_count) if prompt_count else None,
+    "num_prompts_with_correct_response": len(prompt_correct),
+    "prompt_pass_rate": (len(prompt_correct) / prompt_count) if prompt_count else None,
     "num_scored": num_scored,
-    "num_correct": len(correct_rows),
-    "accuracy": (len(correct_rows) / num_scored) if num_scored else None,
-    "response_accuracy": (len(correct_rows) / num_scored) if num_scored else None,
+    "num_correct": num_correct,
+    "accuracy": (num_correct / num_scored) if num_scored else None,
+    "response_accuracy": (num_correct / num_scored) if num_scored else None,
     "raw_jsonl": str(raw_path),
     "all_trajectories_jsonl": str(all_jsonl_path),
     "all_trajectories_parquet": str(all_parquet_path),
