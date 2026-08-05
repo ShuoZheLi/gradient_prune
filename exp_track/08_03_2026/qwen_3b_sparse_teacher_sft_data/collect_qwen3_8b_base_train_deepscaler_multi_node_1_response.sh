@@ -109,7 +109,7 @@ correct_jsonl="${CORRECT_JSONL:-$output_dir/correct_actor_responses.jsonl}"
 calib_parquet="${CALIB_PARQUET:-$output_dir/qwen3_8b_base_train_deepscaler_correct_1_response.parquet}"
 metrics_json="${METRICS_JSON:-$output_dir/metrics.json}"
 
-max_examples="${MAX_EXAMPLES:-7500}"
+max_examples="${MAX_EXAMPLES:--1}"
 start_index="${START_INDEX:-0}"
 seed="${SEED:-42}"
 max_prompt_length="${MAX_PROMPT_LENGTH:-2048}"
