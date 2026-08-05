@@ -145,14 +145,42 @@ if [[ "$num_responses_per_prompt" -gt 1 && "$generation_backend" != "vllm" ]]; t
   echo "NUM_RESPONSES_PER_PROMPT > 1 requires GENERATION_BACKEND=vllm; got $generation_backend" >&2
   exit 2
 fi
+if [[ "$start_index" -lt 0 ]]; then
+  echo "START_INDEX must be >= 0; got $start_index" >&2
+  exit 2
+fi
+if [[ "$max_examples" -lt -1 ]]; then
+  echo "MAX_EXAMPLES must be -1 for all examples, or >= 0; got $max_examples" >&2
+  exit 2
+fi
+if [[ "$max_examples" -eq -1 ]]; then
+  if [[ "$dry_run" != "1" && ! -f "$dataset_path" ]]; then
+    echo "Dataset path does not exist: $dataset_path" >&2
+    exit 2
+  fi
+  dataset_total_examples=$("$python_bin" - "$dataset_path" <<'PY_COUNT_ROWS'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    import pyarrow.parquet as pq
+    print(pq.ParquetFile(path).metadata.num_rows)
+except Exception:
+    import pandas as pd
+    print(len(pd.read_parquet(path, columns=[])))
+PY_COUNT_ROWS
+)
+  max_examples=$((dataset_total_examples - start_index))
+  if [[ "$max_examples" -lt 0 ]]; then
+    max_examples=0
+  fi
+  echo "[collect] MAX_EXAMPLES=-1 resolved to $max_examples examples from $dataset_total_examples dataset rows starting at START_INDEX=$start_index"
+fi
 expected_raw_lines=$((max_examples * num_responses_per_prompt))
 
 mkdir -p "$output_dir" "$shard_dir" "$log_dir"
 
-if [[ "$max_examples" -lt 0 ]]; then
-  echo "MAX_EXAMPLES must be >= 0 for multi-node sharding; got $max_examples" >&2
-  exit 2
-fi
 if [[ "$batch_size" -lt 1 ]]; then
   echo "BATCH_SIZE must be >= 1; got $batch_size" >&2
   exit 2
