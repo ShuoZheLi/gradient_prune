@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=collect_qwen3_8b_base_deepscaler_n1
+#SBATCH --job-name=collect_qwen3_8b_base_deepscaler_n2
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 # For multi-GPU nodes, set --ntasks-per-node to the number of LOCAL_DEVICES.
 #SBATCH --cpus-per-task=72
-#SBATCH --time=6:00:00
-#SBATCH --output=slurm-%j_collect_qwen3_8b_base_deepscaler_n1.out
-#SBATCH --error=slurm-%j_collect_qwen3_8b_base_deepscaler_n1.err
+#SBATCH --time=12:00:00
+#SBATCH --output=slurm-%j_collect_qwen3_8b_base_deepscaler_n2.out
+#SBATCH --error=slurm-%j_collect_qwen3_8b_base_deepscaler_n2.err
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ format_duration() {
   printf '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
 }
 
-# Standalone collector for 1-response trajectories from the unpruned Qwen3-8B base model
+# Standalone collector for 2-response trajectories from the unpruned Qwen3-8B base model
 # on MetaMathQA train_deepscaler. This script does not apply pruning and does not
 # call the older 08/01 wrapper script.
 
@@ -94,19 +94,19 @@ mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
 # -----------------------------
 # Paths and collection config
 # -----------------------------
-RUN_NAME="${RUN_NAME:-collect_qwen3_8b_base_train_deepscaler_1_response}"
+RUN_NAME="${RUN_NAME:-collect_qwen3_8b_base_train_deepscaler_2_response}"
 RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}}"
 
 model_path="${MODEL_PATH:-${BASE_MODEL_PATH:-${MODEL_INIT_CKPT:-/work2/09576/shuozhe/saved_model/Qwen3-8B}}}"
 dataset_path="${DATASET_PATH:-/work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/train_deepscaler.parquet}"
-output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen3_8b_base_train_deepscaler_correct_1_response}"
+output_dir="${OUTPUT_DIR:-$repo_root/saved_calibration_dataset/qwen3_8b_base_train_deepscaler_correct_2_response}"
 raw_jsonl="${RAW_JSONL:-$output_dir/raw_actor_responses.jsonl}"
 shard_dir="${SHARD_DIR:-$output_dir/shards}"
 log_dir="${LOG_DIR:-$output_dir/logs/${RUN_ID}}"
 all_trajectories_jsonl="${ALL_TRAJECTORIES_JSONL:-$output_dir/all_actor_trajectories.jsonl}"
 all_trajectories_parquet="${ALL_TRAJECTORIES_PARQUET:-$output_dir/all_actor_trajectories.parquet}"
 correct_jsonl="${CORRECT_JSONL:-$output_dir/correct_actor_responses.jsonl}"
-calib_parquet="${CALIB_PARQUET:-$output_dir/qwen3_8b_base_train_deepscaler_correct_1_response.parquet}"
+calib_parquet="${CALIB_PARQUET:-$output_dir/qwen3_8b_base_train_deepscaler_correct_2_response.parquet}"
 metrics_json="${METRICS_JSON:-$output_dir/metrics.json}"
 
 max_examples="${MAX_EXAMPLES:--1}"
@@ -119,7 +119,7 @@ batch_size="${BATCH_SIZE:-64}"
 generation_max_batch_tokens="${GENERATION_MAX_BATCH_TOKENS:-0}"
 response_log_max="${RESPONSE_LOG_MAX:--1}"
 multi_response_temperature="${MULTI_RESPONSE_TEMPERATURE:-0.7}"
-num_responses_per_prompt="${NUM_RESPONSES_PER_PROMPT:-1}"
+num_responses_per_prompt="${NUM_RESPONSES_PER_PROMPT:-2}"
 use_cache="${USE_CACHE:-0}"
 temperature="${TEMPERATURE:-1.0}"
 top_p="${TOP_P:-0.95}"
