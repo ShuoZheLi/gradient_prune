@@ -382,7 +382,7 @@ def freeze_non_target_parameters(model: nn.Module, config: Any) -> dict[str, Any
     total_numel = 0
     for name, param in model.named_parameters():
         canonical_name = _canonical_name(name)
-        trainable = should_mask_param(canonical_name, param, target_modules, exclude_keywords, apply_to_bias)
+        trainable = should_mask_param_name(canonical_name, target_modules, exclude_keywords, apply_to_bias)
         param.requires_grad_(trainable)
         numel = int(param.numel())
         total_numel += numel
