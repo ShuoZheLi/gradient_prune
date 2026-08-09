@@ -84,6 +84,9 @@ sparse_update:
   # Build masks from initial model weights before training starts.
   build_mask_on_init: false
 
+  # Freeze all parameters except sparse_update.target_modules instead of building masks.
+  freeze_non_target_params: false
+
   # Rank for SVD reconstruction of pretrained linear weights.
   rank_k: 128
 
