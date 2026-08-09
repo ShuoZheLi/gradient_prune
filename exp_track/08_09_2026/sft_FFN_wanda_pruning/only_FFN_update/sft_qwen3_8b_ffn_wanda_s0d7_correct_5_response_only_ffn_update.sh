@@ -512,6 +512,7 @@ TRAINER_ARGS=(
   data.num_workers="$num_workers"
   optim.lr="$lr"
   engine=fsdp
+  engine.use_orig_params=true
   model.path="$MODEL_PATH"
   trainer.default_local_dir="$TRAIN_LOG_DIR"
   trainer.project_name="$WANDB_PROJECT"

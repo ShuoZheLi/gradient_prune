@@ -513,6 +513,17 @@ class FSDPEngine(BaseEngine):
                 self._prepare_sparse_update_masks(module)
             )
 
+        if (
+            not self.engine_config.forward_only
+            and self.sparse_update_config is not None
+            and self.sparse_update_config.get("freeze_non_target_params", False)
+            and self.engine_config.strategy == "fsdp"
+            and not self._use_orig_params
+        ):
+            self._use_orig_params = True
+            if self.rank == 0:
+                print("sparse_update freeze_non_target_params requires FSDP use_orig_params=True; enabling it.")
+
         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
         log_gpu_memory_usage("Before FSDP", logger=None)
         module = self._build_fsdp_module(module)
