@@ -208,7 +208,7 @@ text_ppl:
   max_length: 18432
 
 task_accuracy:
-  enabled: true
+  enabled: false
   dataset_path: /work2/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet
   backend: vllm
   max_examples: null
