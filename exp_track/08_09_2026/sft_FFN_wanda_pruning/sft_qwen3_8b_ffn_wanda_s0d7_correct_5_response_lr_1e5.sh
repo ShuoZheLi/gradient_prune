@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=sft_ffn_s0d7
+#SBATCH --job-name=sft_ffn_s0d7_lr_1e5
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
 #SBATCH --time=03:00:00
-#SBATCH --output=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response-%j.out
-#SBATCH --error=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response-%j.err
+#SBATCH --output=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response_lr_1e5-%j.out
+#SBATCH --error=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response_lr_1e5-%j.err
 
 set -euo pipefail
 
@@ -48,7 +48,7 @@ python3 -V
 # -----------------------------
 export WANDB_PROJECT="prune_for_post_train"
 WANDB_PROJECT="prune_for_post_train"
-RUN_NAME="${RUN_NAME:-sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response}"
+RUN_NAME="${RUN_NAME:-sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response_lr_1e5}"
 REAL_SLURM_JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
@@ -85,7 +85,7 @@ micro_batch_size_per_gpu=${micro_batch_size_per_gpu:-2}
 max_length=${max_length:-18432}
 max_token_len_per_gpu=${max_token_len_per_gpu:-36864}
 truncation=${truncation:-error}
-lr=${lr:-5e-6}
+lr=${lr:-1e-5}
 total_epochs=${total_epochs:-5}
 save_freq=${save_freq:-50}
 save_initial_checkpoint=${save_initial_checkpoint:-True}

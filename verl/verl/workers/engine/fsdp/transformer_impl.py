@@ -69,6 +69,7 @@ from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.sparse_update_mask import (
     SparseUpdateMaskManager,
     build_masks_from_model,
+    freeze_non_target_parameters,
     load_sparse_masks,
     save_sparse_masks,
     sparse_mask_metadata,
@@ -480,6 +481,18 @@ class FSDPEngine(BaseEngine):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
+
+        if self.sparse_update_config is not None and self.sparse_update_config.get("freeze_non_target_params", False):
+            freeze_metadata = freeze_non_target_parameters(module, self.sparse_update_config)
+            if self.rank == 0:
+                print(
+                    "sparse_update freeze_non_target_params: "
+                    f"mode={freeze_metadata.get('mode')} "
+                    f"num_trainable_tensors={freeze_metadata.get('num_trainable_tensors')} "
+                    f"num_frozen_tensors={freeze_metadata.get('num_frozen_tensors')} "
+                    f"trainable_fraction={freeze_metadata.get('trainable_fraction', 0.0):.6f} "
+                    f"first_trainable_tensors={freeze_metadata.get('first_trainable_tensors')}"
+                )
 
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()

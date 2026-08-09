@@ -15,6 +15,7 @@ SUPPORTED_MODES = {
     "low_magnitude",
     "principal",
     "random_same_density",
+    "target_modules_only",
 }
 DEFAULT_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 DEFAULT_EXCLUDE_KEYWORDS = ["embed", "lm_head", "norm", "layernorm", "rmsnorm"]
@@ -309,6 +310,11 @@ def build_masks_from_model(model: nn.Module, config: Any) -> dict[str, torch.Boo
     mode = _cfg_get(config, "mode", "safe_svd_lowmag")
     if mode == "wanda_top":
         raise ValueError("mode='wanda_top' requires build_masks_from_wanda_scores(...) or tools/build_sparse_update_mask.py --wanda_score_dir")
+    if mode == "target_modules_only":
+        raise ValueError(
+            "mode='target_modules_only' is a requires_grad freezing mode. "
+            "Set sparse_update.freeze_non_target_params=true instead of building sparse-update masks."
+        )
     if mode == "random_same_density" or _cfg_get(config, "random_mask_same_density", False):
         mode = "random_same_density"
     rank_k = int(_cfg_get(config, "rank_k", 128))
@@ -357,6 +363,46 @@ def build_masks_from_model(model: nn.Module, config: Any) -> dict[str, torch.Boo
     if target_modules and not masks:
         logger.warning("sparse_update found no target parameters for target_modules=%s", target_modules)
     return masks
+
+
+def freeze_non_target_parameters(model: nn.Module, config: Any) -> dict[str, Any]:
+    """Set requires_grad=True only for configured target module parameters.
+
+    This is useful for full-module fine-tuning such as updating only MLP/FFN
+    projections while keeping embeddings, attention, norms, and lm_head frozen.
+    Unlike sparse-update masks, this does not allocate one boolean mask entry per
+    model parameter, so it is safe for multi-billion-parameter models.
+    """
+    target_modules = _as_list(_cfg_get(config, "target_modules", DEFAULT_TARGET_MODULES), DEFAULT_TARGET_MODULES)
+    exclude_keywords = _as_list(_cfg_get(config, "exclude_keywords", DEFAULT_EXCLUDE_KEYWORDS), DEFAULT_EXCLUDE_KEYWORDS)
+    apply_to_bias = bool(_cfg_get(config, "apply_to_bias", False))
+    trainable_names: list[str] = []
+    frozen_names: list[str] = []
+    trainable_numel = 0
+    total_numel = 0
+    for name, param in model.named_parameters():
+        canonical_name = _canonical_name(name)
+        trainable = should_mask_param(canonical_name, param, target_modules, exclude_keywords, apply_to_bias)
+        param.requires_grad_(trainable)
+        numel = int(param.numel())
+        total_numel += numel
+        if trainable:
+            trainable_names.append(canonical_name)
+            trainable_numel += numel
+        else:
+            frozen_names.append(canonical_name)
+    return {
+        "mode": "target_modules_only",
+        "target_modules": target_modules,
+        "exclude_keywords": exclude_keywords,
+        "apply_to_bias": apply_to_bias,
+        "num_trainable_tensors": len(trainable_names),
+        "num_frozen_tensors": len(frozen_names),
+        "trainable_numel": trainable_numel,
+        "total_numel": total_numel,
+        "trainable_fraction": (trainable_numel / total_numel) if total_numel else 0.0,
+        "first_trainable_tensors": trainable_names[:20],
+    }
 
 
 def sparse_mask_metadata(masks: dict[str, torch.BoolTensor], config: Any, extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:

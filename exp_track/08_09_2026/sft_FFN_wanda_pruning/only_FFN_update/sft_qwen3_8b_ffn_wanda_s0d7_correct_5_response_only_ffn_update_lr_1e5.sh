@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=sft_ffn_s0d7
+#SBATCH --job-name=sft_ffn_s0d7_onlyffn_lr_1e5
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
 #SBATCH --time=03:00:00
-#SBATCH --output=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response-%j.out
-#SBATCH --error=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response-%j.err
+#SBATCH --output=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response_only_ffn_update_lr_1e5-%j.out
+#SBATCH --error=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response_only_ffn_update_lr_1e5-%j.err
 
 set -euo pipefail
 
@@ -24,6 +24,21 @@ UV_CACHE_DIR="${UV_CACHE_DIR:-${SCRATCH}/.cache/uv}"
 HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${SCRATCH}/data/embeddings}"
 TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${SCRATCH}/.cache/torch_extensions}"
+
+reject_work2_write_path() {
+  local label="$1"
+  local path="$2"
+  case "$path" in
+    /work2/09576/shuozhe|/work2/09576/shuozhe/*)
+      echo "$label points at /work2/09576/shuozhe, which this script must not write to: $path" >&2
+      exit 2
+      ;;
+  esac
+}
+reject_work2_write_path UV_CACHE_DIR "$UV_CACHE_DIR"
+reject_work2_write_path HF_HOME "$HF_HOME"
+reject_work2_write_path TIKTOKEN_ENCODINGS_BASE "$TIKTOKEN_ENCODINGS_BASE"
+reject_work2_write_path TORCH_EXTENSIONS_DIR "$TORCH_EXTENSIONS_DIR"
 
 mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
 
@@ -48,12 +63,18 @@ python3 -V
 # -----------------------------
 export WANDB_PROJECT="prune_for_post_train"
 WANDB_PROJECT="prune_for_post_train"
-RUN_NAME="${RUN_NAME:-sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response}"
+RUN_NAME="${RUN_NAME:-sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response_only_ffn_update_lr_1e5}"
 REAL_SLURM_JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
 HF_DATASETS_CACHE_ROOT="${HF_DATASETS_CACHE:-}"
 HF_MODULES_CACHE_ROOT="${HF_MODULES_CACHE:-}"
+if [[ -n "$HF_DATASETS_CACHE_ROOT" ]]; then
+  reject_work2_write_path HF_DATASETS_CACHE_ROOT "$HF_DATASETS_CACHE_ROOT"
+fi
+if [[ -n "$HF_MODULES_CACHE_ROOT" ]]; then
+  reject_work2_write_path HF_MODULES_CACHE_ROOT "$HF_MODULES_CACHE_ROOT"
+fi
 export HF_DATASETS_CACHE_ROOT
 export HF_MODULES_CACHE_ROOT
 
@@ -70,22 +91,30 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH}/verl_runs}"
 RUN_DIR="${SCRATCH_ROOT}/${RUN_ID}"
 LOG_DIR="${RUN_DIR}/logs"
 TRAIN_LOG_DIR="${RUN_DIR}/train_log"
-ARCHIVE_ROOT="${ARCHIVE_ROOT:-/work/09576/shuozhe/gradient_prune/verl/train_log_archive}"
+ARCHIVE_ROOT="${ARCHIVE_ROOT:-${SCRATCH_ROOT}/train_log_archive}"
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 TRAIN_STDOUT_LOG="${TRAIN_LOG_DIR}/job_${RUN_ID}.txt"
+
+reject_work2_write_path SCRATCH_ROOT "$SCRATCH_ROOT"
+reject_work2_write_path RUN_DIR "$RUN_DIR"
+reject_work2_write_path LOG_DIR "$LOG_DIR"
+reject_work2_write_path TRAIN_LOG_DIR "$TRAIN_LOG_DIR"
+reject_work2_write_path ARCHIVE_ROOT "$ARCHIVE_ROOT"
+reject_work2_write_path ARCHIVE_DIR "$ARCHIVE_DIR"
+reject_work2_write_path TRAIN_STDOUT_LOG "$TRAIN_STDOUT_LOG"
 
 mkdir -p "$LOG_DIR" "$TRAIN_LOG_DIR" "$ARCHIVE_ROOT"
 
 # -----------------------------
 # SFT training defaults
 # -----------------------------
-# Defaults target the structurally FFN-pruned Qwen3-8B s0d7 model on the qwen3-8b-instruct_math7500_correct_5_response dataset.
+# Defaults target the structurally FFN-pruned Qwen3-8B s0d7 model, updating only FFN gate/up/down parameters.
 train_batch_size=${train_batch_size:-128}
 micro_batch_size_per_gpu=${micro_batch_size_per_gpu:-2}
 max_length=${max_length:-18432}
 max_token_len_per_gpu=${max_token_len_per_gpu:-36864}
 truncation=${truncation:-error}
-lr=${lr:-5e-6}
+lr=${lr:-1e-5}
 total_epochs=${total_epochs:-5}
 save_freq=${save_freq:-50}
 save_initial_checkpoint=${save_initial_checkpoint:-True}
@@ -369,6 +398,8 @@ MODEL_PATH="$(resolve_model_init_path "$MODEL_INIT_CKPT" actor)"
 RAW_TRAIN_FILE="$TRAIN_FILE"
 SFT_PREPARED_DATA_DIR="${SFT_PREPARED_DATA_DIR:-${RUN_DIR}/prepared_data}"
 SFT_TRAIN_FILE="${SFT_TRAIN_FILE:-${SFT_PREPARED_DATA_DIR}/train_sft_messages.parquet}"
+reject_work2_write_path SFT_PREPARED_DATA_DIR "$SFT_PREPARED_DATA_DIR"
+reject_work2_write_path SFT_TRAIN_FILE "$SFT_TRAIN_FILE"
 SFT_MAX_SAMPLES="${SFT_MAX_SAMPLES:--1}"
 SFT_DEDUP_BY_PROMPT="${SFT_DEDUP_BY_PROMPT:-false}"
 SFT_RESPONSE_FILTER_CORRECT="${SFT_RESPONSE_FILTER_CORRECT:-true}"
@@ -512,6 +543,11 @@ TRAINER_ARGS=(
   trainer.nnodes="$NNODES"
   trainer.n_gpus_per_node="$GPUS_PER_NODE"
   sparse_update.enabled=false
+  sparse_update.freeze_non_target_params=true
+  sparse_update.mode=target_modules_only
+  sparse_update.target_modules='["gate_proj","up_proj","down_proj"]'
+  sparse_update.exclude_keywords='["embed","lm_head","norm","layernorm","rmsnorm","self_attn","q_proj","k_proj","v_proj","o_proj"]'
+  sparse_update.apply_to_bias=false
 )
 
 if [[ -n "$generation_eval_names" ]]; then
@@ -538,6 +574,14 @@ srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
     export HF_MODULES_CACHE="${HF_MODULES_CACHE_ROOT:-${node_cache_root}/huggingface_modules}"
     export TIKTOKEN_ENCODINGS_BASE="'"${TIKTOKEN_ENCODINGS_BASE}"'"
     export TORCH_EXTENSIONS_DIR="'"${TORCH_EXTENSIONS_DIR}"'/node_${SLURM_PROCID}"
+    for write_path in "$node_cache_root" "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TORCH_EXTENSIONS_DIR"; do
+      case "$write_path" in
+        /work2/09576/shuozhe|/work2/09576/shuozhe/*)
+          echo "Refusing to write per-node cache under /work2/09576/shuozhe: $write_path" >&2
+          exit 2
+          ;;
+      esac
+    done
     mkdir -p "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TORCH_EXTENSIONS_DIR"
     export PYTHONUNBUFFERED=1
     export TOKENIZERS_PARALLELISM=true
