@@ -59,7 +59,7 @@ export HF_MODULES_CACHE_ROOT
 
 WORK_DIR="${WORK_DIR:-/work/09576/shuozhe/gradient_prune/verl}"
 MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/scratch/09576/shuozhe/gradient_prune/results/qwen3_8b_ffn_wanda_structured_pruning_s0d7_correct_5_response/models/s0d7_correct_5_response}"
-TRAIN_FILE="${TRAIN_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3_8b_wanda_s0d1_layerwise_math7500_correct_5_response/qwen3_8b_wanda_s0d1_layerwise_math7500_correct_5_response.parquet}"
+TRAIN_FILE="${TRAIN_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
 VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
 MATH_500_EVAL_FILE="${MATH_500_EVAL_FILE:-${VAL_FILE}}"
 AIME_24_25_26_EVAL_FILE="${AIME_24_25_26_EVAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/aime_24_25_26.parquet}"
