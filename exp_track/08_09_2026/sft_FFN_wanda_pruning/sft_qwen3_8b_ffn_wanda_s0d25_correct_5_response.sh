@@ -25,6 +25,21 @@ HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-${SCRATCH}/data/embeddings}"
 TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${SCRATCH}/.cache/torch_extensions}"
 
+reject_work2_write_path() {
+  local label="$1"
+  local path="$2"
+  case "$path" in
+    /work2/09576/shuozhe|/work2/09576/shuozhe/*)
+      echo "$label points at /work2/09576/shuozhe, which this script must not write to: $path" >&2
+      exit 2
+      ;;
+  esac
+}
+reject_work2_write_path UV_CACHE_DIR "$UV_CACHE_DIR"
+reject_work2_write_path HF_HOME "$HF_HOME"
+reject_work2_write_path TIKTOKEN_ENCODINGS_BASE "$TIKTOKEN_ENCODINGS_BASE"
+reject_work2_write_path TORCH_EXTENSIONS_DIR "$TORCH_EXTENSIONS_DIR"
+
 mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$TIKTOKEN_ENCODINGS_BASE" "$TORCH_EXTENSIONS_DIR"
 
 export UV_CACHE_DIR
@@ -54,6 +69,12 @@ RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
 HF_DATASETS_CACHE_ROOT="${HF_DATASETS_CACHE:-}"
 HF_MODULES_CACHE_ROOT="${HF_MODULES_CACHE:-}"
+if [[ -n "$HF_DATASETS_CACHE_ROOT" ]]; then
+  reject_work2_write_path HF_DATASETS_CACHE_ROOT "$HF_DATASETS_CACHE_ROOT"
+fi
+if [[ -n "$HF_MODULES_CACHE_ROOT" ]]; then
+  reject_work2_write_path HF_MODULES_CACHE_ROOT "$HF_MODULES_CACHE_ROOT"
+fi
 export HF_DATASETS_CACHE_ROOT
 export HF_MODULES_CACHE_ROOT
 
@@ -70,9 +91,17 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH}/verl_runs}"
 RUN_DIR="${SCRATCH_ROOT}/${RUN_ID}"
 LOG_DIR="${RUN_DIR}/logs"
 TRAIN_LOG_DIR="${RUN_DIR}/train_log"
-ARCHIVE_ROOT="${ARCHIVE_ROOT:-/work/09576/shuozhe/gradient_prune/verl/train_log_archive}"
+ARCHIVE_ROOT="${ARCHIVE_ROOT:-${SCRATCH_ROOT}/train_log_archive}"
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 TRAIN_STDOUT_LOG="${TRAIN_LOG_DIR}/job_${RUN_ID}.txt"
+
+reject_work2_write_path SCRATCH_ROOT "$SCRATCH_ROOT"
+reject_work2_write_path RUN_DIR "$RUN_DIR"
+reject_work2_write_path LOG_DIR "$LOG_DIR"
+reject_work2_write_path TRAIN_LOG_DIR "$TRAIN_LOG_DIR"
+reject_work2_write_path ARCHIVE_ROOT "$ARCHIVE_ROOT"
+reject_work2_write_path ARCHIVE_DIR "$ARCHIVE_DIR"
+reject_work2_write_path TRAIN_STDOUT_LOG "$TRAIN_STDOUT_LOG"
 
 mkdir -p "$LOG_DIR" "$TRAIN_LOG_DIR" "$ARCHIVE_ROOT"
 
@@ -340,7 +369,7 @@ PY
 }
 
 sync_to_work() {
-  echo "Syncing lightweight logs/metadata back to archive; checkpoints stay in RUN_DIR."
+  echo "Syncing lightweight logs/metadata to scratch archive; checkpoints stay in RUN_DIR."
   mkdir -p "$ARCHIVE_DIR"
   rsync -a \
     --exclude='**/global_step_*' \
@@ -369,6 +398,8 @@ MODEL_PATH="$(resolve_model_init_path "$MODEL_INIT_CKPT" actor)"
 RAW_TRAIN_FILE="$TRAIN_FILE"
 SFT_PREPARED_DATA_DIR="${SFT_PREPARED_DATA_DIR:-${RUN_DIR}/prepared_data}"
 SFT_TRAIN_FILE="${SFT_TRAIN_FILE:-${SFT_PREPARED_DATA_DIR}/train_sft_messages.parquet}"
+reject_work2_write_path SFT_PREPARED_DATA_DIR "$SFT_PREPARED_DATA_DIR"
+reject_work2_write_path SFT_TRAIN_FILE "$SFT_TRAIN_FILE"
 SFT_MAX_SAMPLES="${SFT_MAX_SAMPLES:--1}"
 SFT_DEDUP_BY_PROMPT="${SFT_DEDUP_BY_PROMPT:-false}"
 SFT_RESPONSE_FILTER_CORRECT="${SFT_RESPONSE_FILTER_CORRECT:-true}"
@@ -538,6 +569,14 @@ srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
     export HF_MODULES_CACHE="${HF_MODULES_CACHE_ROOT:-${node_cache_root}/huggingface_modules}"
     export TIKTOKEN_ENCODINGS_BASE="'"${TIKTOKEN_ENCODINGS_BASE}"'"
     export TORCH_EXTENSIONS_DIR="'"${TORCH_EXTENSIONS_DIR}"'/node_${SLURM_PROCID}"
+    for write_path in "$node_cache_root" "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TORCH_EXTENSIONS_DIR"; do
+      case "$write_path" in
+        /work2/09576/shuozhe|/work2/09576/shuozhe/*)
+          echo "Refusing to write per-node cache under /work2/09576/shuozhe: $write_path" >&2
+          exit 2
+          ;;
+      esac
+    done
     mkdir -p "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$TORCH_EXTENSIONS_DIR"
     export PYTHONUNBUFFERED=1
     export TOKENIZERS_PARALLELISM=true
