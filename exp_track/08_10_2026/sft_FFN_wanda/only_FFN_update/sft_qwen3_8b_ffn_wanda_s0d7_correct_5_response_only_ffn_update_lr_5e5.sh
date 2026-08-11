@@ -127,7 +127,7 @@ eval_freq=${eval_freq:--1}
 loss_eval_freq=${loss_eval_freq:-50}
 generation_eval_freq=${generation_eval_freq:--1}
 
-# loss_eval_files must be SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
+# loss_eval_files may be raw prompt/response or SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
 loss_eval_files=${loss_eval_files:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}
 if [[ -z "${generation_eval_files+x}" ]]; then
   generation_eval_files="${MATH_500_EVAL_FILE} ${AIME_24_25_26_EVAL_FILE}"
@@ -429,6 +429,127 @@ prepare_sft_data() {
   python3 "$converter" "${converter_args[@]}"
 }
 
+LOSS_SFT_MAX_SAMPLES="${LOSS_SFT_MAX_SAMPLES:--1}"
+LOSS_SFT_DEDUP_BY_PROMPT="${LOSS_SFT_DEDUP_BY_PROMPT:-false}"
+LOSS_SFT_RESPONSE_FILTER_CORRECT="${LOSS_SFT_RESPONSE_FILTER_CORRECT:-true}"
+LOSS_SFT_ENABLE_THINKING_COLUMN="${LOSS_SFT_ENABLE_THINKING_COLUMN:-}"
+LOSS_SFT_REUSE_PREPARED_DATA="${LOSS_SFT_REUSE_PREPARED_DATA:-${SFT_REUSE_PREPARED_DATA}}"
+
+loss_eval_has_messages_column() {
+  local input_path="$1"
+
+  python3 - "$input_path" <<'PYLOSSSCHEMA'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+suffix = path.suffix.lower()
+
+if suffix in {".parquet", ".pq"}:
+    try:
+        import pyarrow.parquet as pq
+        columns = set(pq.ParquetFile(path).schema_arrow.names)
+    except Exception as exc:
+        print(f"Unable to inspect loss eval parquet schema for {path}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+elif suffix == ".jsonl":
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    columns = set(json.loads(line).keys())
+                    break
+            else:
+                print(f"Unable to inspect empty loss eval jsonl: {path}", file=sys.stderr)
+                raise SystemExit(2)
+    except Exception as exc:
+        print(f"Unable to inspect loss eval jsonl schema for {path}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+else:
+    print(f"Unsupported loss_eval_files extension for SFT preparation: {path}", file=sys.stderr)
+    raise SystemExit(2)
+
+raise SystemExit(0 if "messages" in columns else 1)
+PYLOSSSCHEMA
+}
+
+prepare_loss_sft_data() {
+  local input_path="$1"
+  local output_path="$2"
+  local converter="$WORK_DIR/tools/prepare_sft_messages_data.py"
+  local converter_args=(
+    --input "$input_path"
+    --output "$output_path"
+    --max-samples "$LOSS_SFT_MAX_SAMPLES"
+  )
+
+  if [[ "$LOSS_SFT_DEDUP_BY_PROMPT" == "true" ]]; then
+    converter_args+=(--dedup-by-prompt)
+  fi
+  if [[ "$LOSS_SFT_RESPONSE_FILTER_CORRECT" != "true" ]]; then
+    converter_args+=(--no-filter-correct)
+  fi
+  if [[ -n "$LOSS_SFT_ENABLE_THINKING_COLUMN" ]]; then
+    converter_args+=(--enable-thinking "$LOSS_SFT_ENABLE_THINKING_COLUMN")
+  fi
+
+  python3 "$converter" "${converter_args[@]}"
+}
+
+prepare_loss_eval_files() {
+  local raw_loss_eval_files="$1"
+  local prepared_paths=()
+  local eval_index=0
+
+  mkdir -p "$SFT_PREPARED_DATA_DIR"
+
+  while IFS= read -r eval_path; do
+    if [[ -z "$eval_path" || "$eval_path" == "null" ]]; then
+      continue
+    fi
+
+    case "${eval_path##*.}" in
+      jsonl|parquet|pq)
+        if loss_eval_has_messages_column "$eval_path"; then
+          echo "Using existing SFT messages loss eval dataset: $eval_path" >&2
+          prepared_paths+=("$eval_path")
+        else
+          local inspect_status=$?
+          if [[ "$inspect_status" -ne 1 ]]; then
+            exit "$inspect_status"
+          fi
+
+          local eval_basename
+          eval_basename="$(basename "$eval_path")"
+          eval_basename="${eval_basename%.*}"
+          local prepared_eval_path="${SFT_PREPARED_DATA_DIR}/loss_eval_${eval_index}_${eval_basename}_sft_messages.parquet"
+
+          if [[ "$LOSS_SFT_REUSE_PREPARED_DATA" == "true" && -f "$prepared_eval_path" ]]; then
+            echo "Reusing prepared loss eval SFT messages dataset: $prepared_eval_path" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
+          else
+            echo "Preparing loss eval SFT messages dataset from: $eval_path" >&2
+            prepare_loss_sft_data "$eval_path" "$prepared_eval_path" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
+          fi
+          prepared_paths+=("$prepared_eval_path")
+        fi
+        ;;
+      *)
+        echo "Unsupported loss_eval_files extension for SFT preparation: $eval_path" >&2
+        exit 1
+        ;;
+    esac
+    eval_index=$((eval_index + 1))
+  done < <(list_eval_paths "$raw_loss_eval_files")
+
+  if [[ ${#prepared_paths[@]} -eq 0 ]]; then
+    echo "null"
+  else
+    normalize_hydra_list_if_many "${prepared_paths[*]}"
+  fi
+}
+
 mkdir -p "$SFT_PREPARED_DATA_DIR"
 case "${TRAIN_FILE##*.}" in
   jsonl|parquet|pq)
@@ -447,6 +568,8 @@ case "${TRAIN_FILE##*.}" in
 esac
 if [[ "$loss_eval_files" == "__TRAIN_FILE__" || "$loss_eval_files" == "$RAW_TRAIN_FILE" ]]; then
   loss_eval_files="$TRAIN_FILE"
+elif [[ "$loss_eval_files" != "null" && -n "$loss_eval_files" ]]; then
+  loss_eval_files="$(prepare_loss_eval_files "$loss_eval_files")"
 fi
 generation_eval_files="$(normalize_hydra_list_if_many "$generation_eval_files")"
 if [[ -n "$generation_eval_names" ]]; then

@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=sft_ffn_s0d7
+#SBATCH --job-name=sft_qwen3_8b_wanda_s0d5
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
 #SBATCH --time=03:00:00
-#SBATCH --output=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response-%j.out
-#SBATCH --error=sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response-%j.err
+#SBATCH --output=sft_qwen3_8b_wanda_s0d5_5x7500-%j.out
+#SBATCH --error=sft_qwen3_8b_wanda_s0d5_5x7500-%j.err
 
 set -euo pipefail
 
@@ -18,7 +18,11 @@ module reset
 module load nvidia/25.9
 
 VENV="${VENV:-/work/09576/shuozhe/verl_setup_tacc/.venv}"
-source "${VENV}/bin/activate"
+if [[ -f "${VENV}/bin/activate" ]]; then
+  source "${VENV}/bin/activate"
+else
+  echo "VENV activate script not found at ${VENV}/bin/activate; using current Python environment."
+fi
 
 UV_CACHE_DIR="${UV_CACHE_DIR:-${SCRATCH}/.cache/uv}"
 HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
@@ -48,7 +52,7 @@ python3 -V
 # -----------------------------
 export WANDB_PROJECT="prune_for_post_train"
 WANDB_PROJECT="prune_for_post_train"
-RUN_NAME="${RUN_NAME:-sft_qwen3_8b_ffn_wanda_s0d7_correct_5_response}"
+RUN_NAME="${RUN_NAME:-sft_qwen3_8b_wanda_s0d5_base_5x7500}"
 REAL_SLURM_JOB_ID="${SLURM_JOB_ID:-manual}"
 RUN_ID="${RUN_NAME}_${REAL_SLURM_JOB_ID}"
 
@@ -58,11 +62,15 @@ export HF_DATASETS_CACHE_ROOT
 export HF_MODULES_CACHE_ROOT
 
 WORK_DIR="${WORK_DIR:-/work/09576/shuozhe/gradient_prune/verl}"
-MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/scratch/09576/shuozhe/gradient_prune/results/qwen3_8b_ffn_wanda_structured_pruning_s0d7_correct_5_response/models/s0d7_correct_5_response}"
+MODEL_INIT_CKPT="${MODEL_INIT_CKPT:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
 TRAIN_FILE="${TRAIN_FILE:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
 VAL_FILE="${VAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/test.parquet}"
 MATH_500_EVAL_FILE="${MATH_500_EVAL_FILE:-${VAL_FILE}}"
 AIME_24_25_26_EVAL_FILE="${AIME_24_25_26_EVAL_FILE:-/work/09576/shuozhe/saved_dataset/MetaMathQA-math-500/aime_24_25_26.parquet}"
+PRUNING_SPARSITY="${PRUNING_SPARSITY:-0.5}"
+SCORE_ROOT="${SCORE_ROOT:-${SCRATCH}/gradient_prune/results/qwen3_8b_wanda_math7500/scores}"
+PRUNE_SCORE_KEY="${PRUNE_SCORE_KEY:-}"
+DRY_RUN="${DRY_RUN:-0}"
 
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -70,6 +78,7 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH}/verl_runs}"
 RUN_DIR="${SCRATCH_ROOT}/${RUN_ID}"
 LOG_DIR="${RUN_DIR}/logs"
 TRAIN_LOG_DIR="${RUN_DIR}/train_log"
+SPARSE_MASK_PATH="${SPARSE_MASK_PATH:-${RUN_DIR}/sparse_update_masks/wanda_s${PRUNING_SPARSITY}.pt}"
 ARCHIVE_ROOT="${ARCHIVE_ROOT:-/work/09576/shuozhe/gradient_prune/verl/train_log_archive}"
 ARCHIVE_DIR="${ARCHIVE_ROOT}/${RUN_ID}"
 TRAIN_STDOUT_LOG="${TRAIN_LOG_DIR}/job_${RUN_ID}.txt"
@@ -79,17 +88,23 @@ mkdir -p "$LOG_DIR" "$TRAIN_LOG_DIR" "$ARCHIVE_ROOT"
 # -----------------------------
 # SFT training defaults
 # -----------------------------
-# Defaults target the structurally FFN-pruned Qwen3-8B s0d7 model on the qwen3-8b-instruct_math7500_correct_5_response dataset.
+# Defaults target Qwen3-8B WANDA-pruned sparse SFT at sparsity 0.5 on the full 5-response x 7500 math dataset.
 train_batch_size=${train_batch_size:-128}
-micro_batch_size_per_gpu=${micro_batch_size_per_gpu:-2}
-max_length=${max_length:-18432}
-max_token_len_per_gpu=${max_token_len_per_gpu:-36864}
+micro_batch_size_per_gpu=${micro_batch_size_per_gpu:-1}
+max_length=${max_length:-14336}
+max_token_len_per_gpu=${max_token_len_per_gpu:-14336}
 truncation=${truncation:-error}
 lr=${lr:-5e-6}
 total_epochs=${total_epochs:-5}
 save_freq=${save_freq:-50}
 save_initial_checkpoint=${save_initial_checkpoint:-True}
 num_workers=${num_workers:-8}
+
+# Sparse SFT: WANDA top-score entries are kept/trainable; all pruned entries are zeroed and stay zero.
+sparse_update_enabled=${sparse_update_enabled:-true}
+sparse_zero_frozen_params=${sparse_zero_frozen_params:-true}
+sparse_verify_frozen_weights=${sparse_verify_frozen_weights:-true}
+sparse_verification_interval=${sparse_verification_interval:-10}
 
 # eval_method: loss, generation_reward, or both.
 eval_method=${eval_method:-loss}
@@ -98,7 +113,7 @@ eval_freq=${eval_freq:--1}
 loss_eval_freq=${loss_eval_freq:-50}
 generation_eval_freq=${generation_eval_freq:--1}
 
-# loss_eval_files may be raw prompt/response or SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
+# Raw prompt/response loss eval files are converted to SFT messages format below.
 loss_eval_files=${loss_eval_files:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}
 if [[ -z "${generation_eval_files+x}" ]]; then
   generation_eval_files="${MATH_500_EVAL_FILE} ${AIME_24_25_26_EVAL_FILE}"
@@ -134,13 +149,18 @@ generation_vllm_enable_multiprocessing=${generation_vllm_enable_multiprocessing:
 # Multi-node torchrun config
 # -----------------------------
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
-NNODES="${SLURM_JOB_NUM_NODES}"
+NNODES="${SLURM_JOB_NUM_NODES:-1}"
 RDZV_PORT="${RDZV_PORT:-29500}"
 
-nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
-nodes_array=($nodes)
-head_node="${nodes_array[0]}"
-head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+if [[ -n "${SLURM_JOB_NODELIST:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+  nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+  nodes_array=($nodes)
+  head_node="${nodes_array[0]}"
+  head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+else
+  head_node="$(hostname)"
+  head_node_ip="$(hostname --ip-address 2>/dev/null || hostname -I 2>/dev/null || echo 127.0.0.1)"
+fi
 
 resolved_head_node_ip=""
 for candidate_ip in $head_node_ip; do
@@ -339,6 +359,42 @@ for step in unique_steps:
 PY
 }
 
+build_sparse_update_mask() {
+  if [[ "$sparse_update_enabled" != "true" && "$sparse_update_enabled" != "True" ]]; then
+    echo "Sparse update disabled; skipping WANDA mask build."
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "DRY_RUN=1; skipping WANDA mask build. Planned mask path: $SPARSE_MASK_PATH"
+    return 0
+  fi
+
+  if [[ -f "$SPARSE_MASK_PATH" ]]; then
+    echo "Reusing sparse-update mask: $SPARSE_MASK_PATH"
+    return 0
+  fi
+
+  if [[ ! -f "$SCORE_ROOT/metadata.json" ]]; then
+    echo "WANDA score root does not contain metadata.json: $SCORE_ROOT" >&2
+    echo "Set SCORE_ROOT=/path/to/scores from the 07_21_2026 qwen3_8b_math500 WANDA script." >&2
+    exit 3
+  fi
+
+  mkdir -p "$(dirname "$SPARSE_MASK_PATH")"
+  echo "Building sparse-update WANDA mask"
+  echo "  model: $MODEL_PATH"
+  echo "  score root: $SCORE_ROOT"
+  echo "  sparsity: $PRUNING_SPARSITY"
+  echo "  output: $SPARSE_MASK_PATH"
+  python3 "$WORK_DIR/tools/build_sparse_update_mask.py" \
+    --model_name_or_path "$MODEL_PATH" \
+    --output_path "$SPARSE_MASK_PATH" \
+    --wanda_score_dir "$SCORE_ROOT" \
+    --sparsity "$PRUNING_SPARSITY" \
+    --mode wanda_top
+}
+
 sync_to_work() {
   echo "Syncing lightweight logs/metadata back to archive; checkpoints stay in RUN_DIR."
   mkdir -p "$ARCHIVE_DIR"
@@ -362,6 +418,7 @@ cleanup() {
 trap cleanup EXIT
 
 MODEL_PATH="$(resolve_model_init_path "$MODEL_INIT_CKPT" actor)"
+build_sparse_update_mask
 
 # -----------------------------
 # Prepare SFT training data
@@ -375,34 +432,38 @@ SFT_RESPONSE_FILTER_CORRECT="${SFT_RESPONSE_FILTER_CORRECT:-true}"
 SFT_ENABLE_THINKING_COLUMN="${SFT_ENABLE_THINKING_COLUMN:-}"
 SFT_REUSE_PREPARED_DATA="${SFT_REUSE_PREPARED_DATA:-false}"
 
-prepare_sft_data() {
-  local input_path="$1"
-  local output_path="$2"
-  local converter="$WORK_DIR/tools/prepare_sft_messages_data.py"
-  local converter_args=(
-    --input "$input_path"
-    --output "$output_path"
-    --max-samples "$SFT_MAX_SAMPLES"
-  )
-
-  if [[ "$SFT_DEDUP_BY_PROMPT" == "true" ]]; then
-    converter_args+=(--dedup-by-prompt)
-  fi
-  if [[ "$SFT_RESPONSE_FILTER_CORRECT" != "true" ]]; then
-    converter_args+=(--no-filter-correct)
-  fi
-  if [[ -n "$SFT_ENABLE_THINKING_COLUMN" ]]; then
-    converter_args+=(--enable-thinking "$SFT_ENABLE_THINKING_COLUMN")
-  fi
-
-  python3 "$converter" "${converter_args[@]}"
-}
-
 LOSS_SFT_MAX_SAMPLES="${LOSS_SFT_MAX_SAMPLES:--1}"
 LOSS_SFT_DEDUP_BY_PROMPT="${LOSS_SFT_DEDUP_BY_PROMPT:-false}"
 LOSS_SFT_RESPONSE_FILTER_CORRECT="${LOSS_SFT_RESPONSE_FILTER_CORRECT:-true}"
 LOSS_SFT_ENABLE_THINKING_COLUMN="${LOSS_SFT_ENABLE_THINKING_COLUMN:-}"
 LOSS_SFT_REUSE_PREPARED_DATA="${LOSS_SFT_REUSE_PREPARED_DATA:-${SFT_REUSE_PREPARED_DATA}}"
+
+prepare_sft_data() {
+  local input_path="$1"
+  local output_path="$2"
+  local max_samples="$3"
+  local dedup_by_prompt="$4"
+  local filter_correct="$5"
+  local enable_thinking="$6"
+  local converter="$WORK_DIR/tools/prepare_sft_messages_data.py"
+  local converter_args=(
+    --input "$input_path"
+    --output "$output_path"
+    --max-samples "$max_samples"
+  )
+
+  if [[ "$dedup_by_prompt" == "true" ]]; then
+    converter_args+=(--dedup-by-prompt)
+  fi
+  if [[ "$filter_correct" != "true" ]]; then
+    converter_args+=(--no-filter-correct)
+  fi
+  if [[ -n "$enable_thinking" ]]; then
+    converter_args+=(--enable-thinking "$enable_thinking")
+  fi
+
+  python3 "$converter" "${converter_args[@]}"
+}
 
 loss_eval_has_messages_column() {
   local input_path="$1"
@@ -444,29 +505,6 @@ raise SystemExit(0 if "messages" in columns else 1)
 PYLOSSSCHEMA
 }
 
-prepare_loss_sft_data() {
-  local input_path="$1"
-  local output_path="$2"
-  local converter="$WORK_DIR/tools/prepare_sft_messages_data.py"
-  local converter_args=(
-    --input "$input_path"
-    --output "$output_path"
-    --max-samples "$LOSS_SFT_MAX_SAMPLES"
-  )
-
-  if [[ "$LOSS_SFT_DEDUP_BY_PROMPT" == "true" ]]; then
-    converter_args+=(--dedup-by-prompt)
-  fi
-  if [[ "$LOSS_SFT_RESPONSE_FILTER_CORRECT" != "true" ]]; then
-    converter_args+=(--no-filter-correct)
-  fi
-  if [[ -n "$LOSS_SFT_ENABLE_THINKING_COLUMN" ]]; then
-    converter_args+=(--enable-thinking "$LOSS_SFT_ENABLE_THINKING_COLUMN")
-  fi
-
-  python3 "$converter" "${converter_args[@]}"
-}
-
 prepare_loss_eval_files() {
   local raw_loss_eval_files="$1"
   local prepared_paths=()
@@ -499,7 +537,13 @@ prepare_loss_eval_files() {
             echo "Reusing prepared loss eval SFT messages dataset: $prepared_eval_path" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
           else
             echo "Preparing loss eval SFT messages dataset from: $eval_path" >&2
-            prepare_loss_sft_data "$eval_path" "$prepared_eval_path" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
+            prepare_sft_data \
+              "$eval_path" \
+              "$prepared_eval_path" \
+              "$LOSS_SFT_MAX_SAMPLES" \
+              "$LOSS_SFT_DEDUP_BY_PROMPT" \
+              "$LOSS_SFT_RESPONSE_FILTER_CORRECT" \
+              "$LOSS_SFT_ENABLE_THINKING_COLUMN" | tee -a "$LOG_DIR/prepare_sft_data.log" >&2
           fi
           prepared_paths+=("$prepared_eval_path")
         fi
@@ -519,22 +563,32 @@ prepare_loss_eval_files() {
   fi
 }
 
-mkdir -p "$SFT_PREPARED_DATA_DIR"
-case "${TRAIN_FILE##*.}" in
-  jsonl|parquet|pq)
-    if [[ "$SFT_REUSE_PREPARED_DATA" == "true" && -f "$SFT_TRAIN_FILE" ]]; then
-      echo "Reusing prepared SFT messages dataset: $SFT_TRAIN_FILE" | tee "$LOG_DIR/prepare_sft_data.log"
-    else
-      echo "Preparing SFT messages dataset from: $TRAIN_FILE"
-      prepare_sft_data "$TRAIN_FILE" "$SFT_TRAIN_FILE" | tee "$LOG_DIR/prepare_sft_data.log"
-    fi
-    TRAIN_FILE="$SFT_TRAIN_FILE"
-    ;;
-  *)
-    echo "Unsupported TRAIN_FILE extension: $TRAIN_FILE" >&2
-    exit 1
-    ;;
-esac
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "DRY_RUN=1; skipping SFT data preparation."
+else
+  mkdir -p "$SFT_PREPARED_DATA_DIR"
+  case "${TRAIN_FILE##*.}" in
+    jsonl|parquet|pq)
+      if [[ "$SFT_REUSE_PREPARED_DATA" == "true" && -f "$SFT_TRAIN_FILE" ]]; then
+        echo "Reusing prepared SFT messages dataset: $SFT_TRAIN_FILE" | tee "$LOG_DIR/prepare_sft_data.log"
+      else
+        echo "Preparing SFT messages dataset from: $TRAIN_FILE"
+        prepare_sft_data \
+          "$TRAIN_FILE" \
+          "$SFT_TRAIN_FILE" \
+          "$SFT_MAX_SAMPLES" \
+          "$SFT_DEDUP_BY_PROMPT" \
+          "$SFT_RESPONSE_FILTER_CORRECT" \
+          "$SFT_ENABLE_THINKING_COLUMN" | tee "$LOG_DIR/prepare_sft_data.log"
+      fi
+      TRAIN_FILE="$SFT_TRAIN_FILE"
+      ;;
+    *)
+      echo "Unsupported TRAIN_FILE extension: $TRAIN_FILE" >&2
+      exit 1
+      ;;
+  esac
+fi
 if [[ "$loss_eval_files" == "__TRAIN_FILE__" || "$loss_eval_files" == "$RAW_TRAIN_FILE" ]]; then
   loss_eval_files="$TRAIN_FILE"
 elif [[ "$loss_eval_files" != "null" && -n "$loss_eval_files" ]]; then
@@ -551,7 +605,7 @@ PRIMARY_VAL_FILE="$(list_eval_paths "$generation_eval_files" | head -n 1)"
 # -----------------------------
 echo "Job ID: ${SLURM_JOB_ID:-manual}"
 echo "Run ID: ${RUN_ID}"
-echo "SLURM nodes: ${SLURM_JOB_NODELIST}"
+echo "SLURM nodes: ${SLURM_JOB_NODELIST:-local}"
 echo "Head node: ${head_node}"
 echo "Rendezvous endpoint: ${RDZV_ENDPOINT}"
 echo "GPUS_PER_NODE: ${GPUS_PER_NODE}"
@@ -563,6 +617,12 @@ echo "TRAIN_LOG_DIR: ${TRAIN_LOG_DIR}"
 describe_path "WORK_DIR" "$WORK_DIR"
 describe_path "MODEL_INIT_CKPT" "$MODEL_INIT_CKPT"
 describe_path "MODEL_PATH" "$MODEL_PATH"
+describe_path "SCORE_ROOT" "$SCORE_ROOT"
+echo "PRUNING_SPARSITY: $PRUNING_SPARSITY"
+echo "SPARSE_MASK_PATH: $SPARSE_MASK_PATH"
+echo "sparse_update_enabled: $sparse_update_enabled"
+echo "sparse_zero_frozen_params: $sparse_zero_frozen_params"
+echo "sparse_verify_frozen_weights: $sparse_verify_frozen_weights"
 describe_path "TRAIN_FILE" "$TRAIN_FILE"
 describe_path "VAL_FILE" "$VAL_FILE"
 describe_path "loss_eval_files" "$loss_eval_files"
@@ -577,6 +637,11 @@ echo "generation_eval_enable_thinking: $generation_eval_enable_thinking"
 
 ls -ld "$WORK_DIR"
 ls -lh "$TRAIN_FILE"
+while IFS= read -r eval_path; do
+  if [[ "$eval_path" != "null" && -n "$eval_path" ]]; then
+    ls -lh "$eval_path"
+  fi
+done < <(list_eval_paths "$loss_eval_files")
 while IFS= read -r eval_path; do
   if [[ "$eval_path" != "null" && -n "$eval_path" ]]; then
     ls -lh "$eval_path"
@@ -604,6 +669,7 @@ TRAINER_ARGS=(
   data.num_workers="$num_workers"
   optim.lr="$lr"
   engine=fsdp
+  engine.use_orig_params=true
   model.path="$MODEL_PATH"
   trainer.default_local_dir="$TRAIN_LOG_DIR"
   trainer.project_name="$WANDB_PROJECT"
@@ -634,7 +700,14 @@ TRAINER_ARGS=(
   trainer.resume_from_path="$resume_from_path"
   trainer.nnodes="$NNODES"
   trainer.n_gpus_per_node="$GPUS_PER_NODE"
-  sparse_update.enabled=false
+  sparse_update.enabled="$sparse_update_enabled"
+  sparse_update.mask_path="$SPARSE_MASK_PATH"
+  sparse_update.mode=wanda_top
+  sparse_update.zero_frozen_params="$sparse_zero_frozen_params"
+  sparse_update.restore_frozen_after_step=true
+  sparse_update.mask_optimizer_state=true
+  sparse_update.verify_frozen_weights="$sparse_verify_frozen_weights"
+  sparse_update.verification_interval="$sparse_verification_interval"
 )
 
 if [[ -n "$generation_eval_names" ]]; then
@@ -642,6 +715,12 @@ if [[ -n "$generation_eval_names" ]]; then
 fi
 
 print_planned_checkpoint_dirs
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "DRY_RUN=1; resolved trainer args:"
+  printf '  %q\n' "${TRAINER_ARGS[@]}"
+  exit 0
+fi
 
 # -----------------------------
 # Run SFT training
@@ -651,7 +730,9 @@ print_planned_checkpoint_dirs
 srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
   bash -c '
     set -euo pipefail
-    source "'"${VENV}"'/bin/activate"
+    if [[ -f "'"${VENV}"'/bin/activate" ]]; then
+      source "'"${VENV}"'/bin/activate"
+    fi
     cd "'"${WORK_DIR}"'"
     export PYTHONPATH="'"${WORK_DIR}"'${PYTHONPATH:+:${PYTHONPATH}}"
     export UV_CACHE_DIR="'"${UV_CACHE_DIR}"'"
