@@ -128,7 +128,7 @@ loss_eval_freq=${loss_eval_freq:-50}
 generation_eval_freq=${generation_eval_freq:--1}
 
 # loss_eval_files must be SFT messages format; generation_eval_files must be PPO prompt+reward_model format.
-loss_eval_files=${loss_eval_files:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct}
+loss_eval_files=${loss_eval_files:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}
 if [[ -z "${generation_eval_files+x}" ]]; then
   generation_eval_files="${MATH_500_EVAL_FILE} ${AIME_24_25_26_EVAL_FILE}"
   generation_eval_names=${generation_eval_names:-"math_500 aime_24_25_26"}
