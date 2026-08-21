@@ -120,6 +120,8 @@ def _compute_probe(
     total_probes: int,
     probe_seed: int,
     rank: int = 0,
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> dict[str, object]:
     started = time.perf_counter()
     seed = probe_seed + probe_index
@@ -142,6 +144,8 @@ def _compute_probe(
         parameter_space,
         causal_sft_nll,
         objective_name=f"reference/rank{rank}",
+        activation_offload=activation_offload,
+        activation_offload_pin_memory=activation_offload_pin_memory,
     )
     x = {
         name: reference_hvp[name] * probe[name].to(dtype=torch.float32)
@@ -155,6 +159,8 @@ def _compute_probe(
         parameter_space,
         causal_sft_nll,
         objective_name=f"kd/rank{rank}",
+        activation_offload=activation_offload,
+        activation_offload_pin_memory=activation_offload_pin_memory,
     )
     y = {
         name: kd_hvp[name] * probe[name].to(dtype=torch.float32)
@@ -245,6 +251,8 @@ def compute_dense_pruning_scores(
     metadata: dict[str, object],
     save_intermediate_stats: bool,
     convergence_checkpoints: tuple[int, ...] = (),
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> dict[str, object]:
     if num_probes < 2:
         raise ValueError("num_probes must be at least 2 for unbiased sample covariance; use --smoke_test for M=1")
@@ -264,6 +272,8 @@ def compute_dense_pruning_scores(
                 probe_index=probe_index,
                 total_probes=num_probes,
                 probe_seed=probe_seed,
+                activation_offload=activation_offload,
+                activation_offload_pin_memory=activation_offload_pin_memory,
             )
         )
         if stats.count in convergence_checkpoints:
@@ -390,6 +400,8 @@ def compute_distributed_dense_pruning_scores(
     rank: int,
     world_size: int,
     distributed_state_dir: str | Path | None = None,
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> dict[str, object] | None:
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("torch.distributed must be initialized for distributed probe scoring")
@@ -422,6 +434,8 @@ def compute_distributed_dense_pruning_scores(
                 total_probes=num_probes,
                 probe_seed=probe_seed,
                 rank=rank,
+                activation_offload=activation_offload,
+                activation_offload_pin_memory=activation_offload_pin_memory,
             )
         )
         global_prefix_count = probe_index + 1
@@ -483,6 +497,8 @@ def run_single_probe_smoke_test(
     parameter_space: ParameterSpace,
     *,
     probe_seed: int,
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> dict[str, object]:
     probe = make_rademacher_probe(
         parameter_space.hvp_names,
@@ -496,7 +512,16 @@ def run_single_probe_smoke_test(
         parameter_space,
         causal_sft_nll,
         objective_name="reference",
+        activation_offload=activation_offload,
+        activation_offload_pin_memory=activation_offload_pin_memory,
     )
+    x_summary = mapping_summary(
+        {
+            name: reference_hvp[name] * probe[name].float()
+            for name in parameter_space.candidate_names
+        }
+    )
+    del reference_hvp
     kd_hvp, kd_info = compute_dataset_hvp(
         model,
         kd_loader,
@@ -504,14 +529,21 @@ def run_single_probe_smoke_test(
         parameter_space,
         causal_sft_nll,
         objective_name="kd",
+        activation_offload=activation_offload,
+        activation_offload_pin_memory=activation_offload_pin_memory,
     )
-    x = {name: reference_hvp[name] * probe[name].float() for name in parameter_space.candidate_names}
-    y = {name: kd_hvp[name] * probe[name].float() for name in parameter_space.candidate_names}
+    y_summary = mapping_summary(
+        {
+            name: kd_hvp[name] * probe[name].float()
+            for name in parameter_space.candidate_names
+        }
+    )
+    del kd_hvp, probe
     return {
         "probe_seed": probe_seed,
         "reference": reference_info,
         "kd": kd_info,
-        "x": mapping_summary(x),
-        "y": mapping_summary(y),
+        "x": x_summary,
+        "y": y_summary,
         "gpu_memory": gpu_memory_summary(),
     }

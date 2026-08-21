@@ -55,6 +55,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--shuffle_kd", action="store_true")
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--activation_offload", choices=["none", "cpu"], default="none")
+    parser.add_argument("--activation_offload_pin_memory", action="store_true")
     parser.add_argument("--save_intermediate_stats", action="store_true")
     parser.add_argument("--convergence_checkpoints", default="", help="Comma-separated cumulative probe counts")
     parser.add_argument("--smoke_test", action="store_true", help="Run exactly one shared ref/KD HVP and save diagnostics only")
@@ -246,6 +248,8 @@ def main() -> int:
         "device": args.device,
         "attention_implementation": "eager",
         "gradient_checkpointing": args.gradient_checkpointing,
+        "activation_offload": args.activation_offload,
+        "activation_offload_pin_memory": args.activation_offload_pin_memory,
         "datasets_disjoint_by_exact_token_hash": True,
         "datasets_disjoint_by_explicit_key_when_available": True,
         "distributed_probe_parallel": bool(args.distributed_probe_parallel and world_size > 1),
@@ -259,6 +263,8 @@ def main() -> int:
             kd_loader,
             parameter_space,
             probe_seed=args.probe_seed,
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
         smoke_path = output_path.with_suffix(output_path.suffix + ".smoke.json")
         smoke_path.write_text(json.dumps({"metadata": metadata, "diagnostics": diagnostics}, indent=2), encoding="utf-8")
@@ -282,6 +288,8 @@ def main() -> int:
             rank=rank,
             world_size=world_size,
             distributed_state_dir=args.distributed_state_dir,
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
         dist.destroy_process_group()
     else:
@@ -297,6 +305,8 @@ def main() -> int:
             metadata=metadata,
             save_intermediate_stats=args.save_intermediate_stats,
             convergence_checkpoints=convergence_checkpoints,
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
     return 0
 

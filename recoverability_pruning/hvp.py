@@ -4,6 +4,8 @@ import logging
 import math
 import time
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
+from typing import ContextManager
 
 import torch
 
@@ -12,6 +14,19 @@ from .params import ParameterSpace
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _saved_tensor_context(activation_offload: str, pin_memory: bool) -> ContextManager[None]:
+    if activation_offload == "none":
+        return nullcontext()
+    if activation_offload == "cpu":
+        return torch.autograd.graph.save_on_cpu(
+            pin_memory=pin_memory,
+            device_type="cuda",
+        )
+    raise ValueError(
+        f"Unsupported activation_offload={activation_offload!r}; expected 'none' or 'cpu'"
+    )
 
 
 def _model_input_device(model) -> torch.device:
@@ -29,41 +44,47 @@ def compute_batch_hvp(
     probe: Mapping[str, torch.Tensor],
     parameter_space: ParameterSpace,
     loss_fn: Callable[[object, dict[str, torch.Tensor]], NLLResult],
+    *,
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> tuple[dict[str, torch.Tensor], int]:
     model.zero_grad(set_to_none=True)
     moved_batch = _move_batch(batch, _model_input_device(model))
-    result = loss_fn(model, moved_batch)
-    first_gradients = torch.autograd.grad(
-        result.loss,
-        parameter_space.hvp_parameters,
-        create_graph=True,
-        allow_unused=True,
-    )
-    directional_derivative = result.loss.new_zeros(())
-    for name, gradient in zip(parameter_space.hvp_names, first_gradients, strict=True):
-        if gradient is None:
-            continue
-        probe_tensor = probe[name].to(device=gradient.device, dtype=gradient.dtype, non_blocking=True)
-        directional_derivative = directional_derivative + (gradient * probe_tensor).sum().to(result.loss.device)
-    if not directional_derivative.requires_grad:
-        raise RuntimeError("Directional derivative has no gradient graph; second-order autodiff is unavailable")
-    candidate_hvp = torch.autograd.grad(
-        directional_derivative,
-        parameter_space.candidate_parameters,
-        allow_unused=True,
-    )
-    output = {}
-    for name, parameter, value in zip(
-        parameter_space.candidate_names,
-        parameter_space.candidate_parameters,
-        candidate_hvp,
-        strict=True,
-    ):
-        if value is None:
-            value = torch.zeros_like(parameter)
-        output[name] = value.detach().to(device="cpu", dtype=torch.float32)
-    model.zero_grad(set_to_none=True)
-    return output, result.num_tokens
+    try:
+        with _saved_tensor_context(activation_offload, activation_offload_pin_memory):
+            result = loss_fn(model, moved_batch)
+            first_gradients = torch.autograd.grad(
+                result.loss,
+                parameter_space.hvp_parameters,
+                create_graph=True,
+                allow_unused=True,
+            )
+            directional_derivative = result.loss.new_zeros(())
+            for name, gradient in zip(parameter_space.hvp_names, first_gradients, strict=True):
+                if gradient is None:
+                    continue
+                probe_tensor = probe[name].to(device=gradient.device, dtype=gradient.dtype, non_blocking=True)
+                directional_derivative = directional_derivative + (gradient * probe_tensor).sum().to(result.loss.device)
+            if not directional_derivative.requires_grad:
+                raise RuntimeError("Directional derivative has no gradient graph; second-order autodiff is unavailable")
+            candidate_hvp = torch.autograd.grad(
+                directional_derivative,
+                parameter_space.candidate_parameters,
+                allow_unused=True,
+            )
+        output = {}
+        for name, parameter, value in zip(
+            parameter_space.candidate_names,
+            parameter_space.candidate_parameters,
+            candidate_hvp,
+            strict=True,
+        ):
+            if value is None:
+                value = torch.zeros_like(parameter)
+            output[name] = value.detach().to(device="cpu", dtype=torch.float32)
+        return output, result.num_tokens
+    finally:
+        model.zero_grad(set_to_none=True)
 
 
 def compute_dataset_hvp(
@@ -74,7 +95,9 @@ def compute_dataset_hvp(
     loss_fn: Callable[[object, dict[str, torch.Tensor]], NLLResult],
     *,
     objective_name: str,
-) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
+) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
     accumulator = {
         name: torch.zeros(parameter.shape, dtype=torch.float32, device="cpu")
         for name, parameter in zip(
@@ -92,6 +115,8 @@ def compute_dataset_hvp(
             probe,
             parameter_space,
             loss_fn,
+            activation_offload=activation_offload,
+            activation_offload_pin_memory=activation_offload_pin_memory,
         )
         for name in accumulator:
             accumulator[name].add_(batch_hvp[name], alpha=num_tokens)
@@ -116,4 +141,6 @@ def compute_dataset_hvp(
         "num_tokens": float(total_tokens),
         "candidate_hvp_norm": math.sqrt(squared_norm),
         "runtime_seconds": time.perf_counter() - started,
+        "activation_offload": activation_offload,
+        "activation_offload_pin_memory": activation_offload_pin_memory,
     }

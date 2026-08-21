@@ -68,6 +68,49 @@ def test_reverse_over_reverse_hvp_matches_explicit_hessian():
     torch.testing.assert_close(estimated["transition.weight"].reshape(-1), exact, rtol=2e-4, atol=2e-5)
 
 
+def test_cpu_activation_offload_matches_standard_hvp():
+    torch.manual_seed(11)
+    model = TinyCausalLM(vocab_size=4)
+    parameter_space = build_parameter_space(
+        model,
+        candidate_modules=["transition"],
+        hvp_parameter_scope="candidates",
+    )
+    batch = {
+        "input_ids": torch.tensor([[0, 1, 3, 2, 1]], dtype=torch.long),
+        "labels": torch.tensor([[0, 1, 3, 2, 1]], dtype=torch.long),
+        "attention_mask": torch.ones(1, 5, dtype=torch.long),
+    }
+    probe = {
+        "transition.weight": torch.tensor(
+            [
+                [1, -1, 1, -1],
+                [-1, 1, -1, 1],
+                [1, 1, -1, -1],
+                [-1, -1, 1, 1],
+            ],
+            dtype=torch.int8,
+        )
+    }
+    standard, standard_tokens = compute_batch_hvp(
+        model,
+        batch,
+        probe,
+        parameter_space,
+        causal_sft_nll,
+    )
+    offloaded, offloaded_tokens = compute_batch_hvp(
+        model,
+        batch,
+        probe,
+        parameter_space,
+        causal_sft_nll,
+        activation_offload="cpu",
+    )
+    assert standard_tokens == offloaded_tokens == 4
+    torch.testing.assert_close(offloaded["transition.weight"], standard["transition.weight"])
+
+
 def test_causal_nll_respects_shifted_label_mask():
     model = TinyCausalLM(vocab_size=3)
     batch = {

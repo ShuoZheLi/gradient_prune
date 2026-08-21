@@ -37,6 +37,14 @@ so the loader forces every `torch.nn.Dropout` probability to zero before enablin
 train mode; this keeps the scoring objective deterministic while reducing retained
 activation memory.
 
+For additional GPU-memory reduction, `--activation_offload cpu` wraps the full
+forward/first-backward/second-backward HVP region in PyTorch's saved-tensor CPU
+offload context. Saved autograd tensors are restored to the GPU only when needed.
+This preserves the exact reverse-over-reverse HVP but increases host-memory use
+and CPU/GPU transfer time. `--activation_offload_pin_memory` is optional and is
+disabled by default because long-context HVPs can otherwise pin a very large
+amount of host memory.
+
 ## Full score generation
 
 ```bash

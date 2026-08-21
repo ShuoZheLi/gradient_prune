@@ -51,7 +51,7 @@ export TORCH_HOME="${TORCH_HOME:-$SCRATCH_ROOT/torch}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$SCRATCH_ROOT/triton/${SLURM_JOB_ID:-manual}}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$SCRATCH_ROOT/xdg_cache}"
 export TOKENIZERS_PARALLELISM=false
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 mkdir -p "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" "$TORCH_HOME" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME"
 
 unset MASTER_ADDR MASTER_PORT WORLD_SIZE RANK LOCAL_RANK GROUP_RANK ROLE_RANK ROLE_NAME TORCHELASTIC_RUN_ID || true
@@ -96,6 +96,8 @@ SAVE_INTERMEDIATE_STATS="${SAVE_INTERMEDIATE_STATS:-0}"
 SHUFFLE_DATASETS="${SHUFFLE_DATASETS:-1}"
 LOSS_ON="${LOSS_ON:-full_trajectory}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
+ACTIVATION_OFFLOAD="${ACTIVATION_OFFLOAD:-cpu}"
+ACTIVATION_OFFLOAD_PIN_MEMORY="${ACTIVATION_OFFLOAD_PIN_MEMORY:-0}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
 NNODES="${SLURM_JOB_NUM_NODES:-1}"
@@ -184,11 +186,15 @@ COMMON_ARGS=(
   --dtype "$DTYPE"
   --device "$DEVICE_MAP"
   --loss_on "$LOSS_ON"
+  --activation_offload "$ACTIVATION_OFFLOAD"
   --truncation_side right
   --hvp_parameter_scope all
 )
 if [[ "$GRADIENT_CHECKPOINTING" == "1" ]]; then
   COMMON_ARGS+=(--gradient_checkpointing)
+fi
+if [[ "$ACTIVATION_OFFLOAD_PIN_MEMORY" == "1" ]]; then
+  COMMON_ARGS+=(--activation_offload_pin_memory)
 fi
 
 echo "[dap_nll_sft] repo_root=$REPO_ROOT"
@@ -200,6 +206,7 @@ echo "[dap_nll_sft] num_probes=$NUM_PROBES eta=$PROBE_LR_ETA"
 echo "[dap_nll_sft] max_ref_samples=$MAX_REF_SAMPLES max_kd_samples=$MAX_KD_SAMPLES max_length=$MAX_LENGTH"
 echo "[dap_nll_sft] loss_on=$LOSS_ON hvp_parameter_scope=all"
 echo "[dap_nll_sft] gradient_checkpointing=$GRADIENT_CHECKPOINTING smoke_max_length=$SMOKE_MAX_LENGTH"
+echo "[dap_nll_sft] activation_offload=$ACTIVATION_OFFLOAD pin_memory=$ACTIVATION_OFFLOAD_PIN_MEMORY"
 echo "[dap_nll_sft] distributed_probe_parallel=true nnodes=$NNODES gpus_per_node=$GPUS_PER_NODE world_size=$WORLD_SIZE"
 echo "[dap_nll_sft] probe allocation: one full model replica per GPU, disjoint contiguous probe blocks"
 echo "[dap_nll_sft] rendezvous=$RDZV_ENDPOINT head_node=$head_node"
@@ -232,7 +239,7 @@ if [[ "$RUN_SMOKE_FIRST" == "1" ]]; then
       --max_length "$SMOKE_MAX_LENGTH" \
       --max_ref_samples 1 \
       --max_kd_samples 1 \
-      --candidate_modules q_proj \
+      --candidate_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
       --smoke_test
 fi
 
