@@ -17,6 +17,7 @@ dependencies = [
   "pyyaml",
   "tqdm",
   "numpy",
+  "scipy",
   "matplotlib",
 ]
 
@@ -26,6 +27,7 @@ vllm = ["vllm"]
 
 [tool.setuptools]
 py-modules = ["activation_stats", "apply_pruning", "calibration_loaders", "config", "data_utils", "eval_distill_metrics", "evaluate_accuracy", "evaluate_ce", "evaluate_ppl", "experiment_runner", "gradient_stats", "layer_utils", "masks", "model_utils", "plotting", "pruning_scores"]
+packages = ["recoverability_pruning"]
 
 [tool.setuptools.package-dir]
 "" = "src"
