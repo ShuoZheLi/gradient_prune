@@ -3,17 +3,23 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .data import assert_disjoint_datasets, load_trajectory_dataset, make_trajectory_dataloader
 from .params import DEFAULT_CANDIDATE_MODULES, build_parameter_space, parameter_numel, parse_module_patterns
-from .scoring import compute_dense_pruning_scores, run_single_probe_smoke_test
+from .scoring import (
+    compute_dense_pruning_scores,
+    compute_distributed_dense_pruning_scores,
+    run_single_probe_smoke_test,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -52,6 +58,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_intermediate_stats", action="store_true")
     parser.add_argument("--convergence_checkpoints", default="", help="Comma-separated cumulative probe counts")
     parser.add_argument("--smoke_test", action="store_true", help="Run exactly one shared ref/KD HVP and save diagnostics only")
+    parser.add_argument("--distributed_probe_parallel", action="store_true")
+    parser.add_argument("--distributed_state_dir")
     return parser.parse_args()
 
 
@@ -121,9 +129,34 @@ def _load_model(args: argparse.Namespace):
     return model, tokenizer
 
 
+def _initialize_distributed(args: argparse.Namespace) -> tuple[int, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    if world_size == 1:
+        if args.distributed_probe_parallel:
+            LOGGER.warning("--distributed_probe_parallel requested with WORLD_SIZE=1; using sequential scoring")
+        return rank, world_size
+    if not args.distributed_probe_parallel:
+        raise ValueError(
+            f"WORLD_SIZE={world_size} requires --distributed_probe_parallel to avoid duplicate score writers"
+        )
+    if args.smoke_test:
+        raise ValueError("Run --smoke_test as a single process before the distributed full job")
+    if args.device in {"auto", "balanced", "balanced_low_0", "sequential"}:
+        raise ValueError("Distributed probe parallelism requires one complete model per rank; use --device cuda:0")
+    dist.init_process_group(backend="gloo")
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        args.device = f"cuda:{local_rank}"
+    LOGGER.info("Initialized distributed probe parallelism rank=%d world_size=%d device=%s", rank, world_size, args.device)
+    return rank, world_size
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parse_args()
+    rank, world_size = _initialize_distributed(args)
     if Path(args.ref_dataset_path).resolve() == Path(args.kd_dataset_path).resolve():
         raise ValueError("Reference and KD dataset paths must differ")
     if not args.smoke_test and args.num_probes < 2:
@@ -215,6 +248,9 @@ def main() -> int:
         "gradient_checkpointing": args.gradient_checkpointing,
         "datasets_disjoint_by_exact_token_hash": True,
         "datasets_disjoint_by_explicit_key_when_available": True,
+        "distributed_probe_parallel": bool(args.distributed_probe_parallel and world_size > 1),
+        "distributed_rank": rank,
+        "distributed_world_size": world_size,
     }
     if args.smoke_test:
         diagnostics = run_single_probe_smoke_test(
@@ -229,19 +265,39 @@ def main() -> int:
         LOGGER.info("M=1 reference+KD HVP smoke test passed: %s", smoke_path)
         return 0
 
-    compute_dense_pruning_scores(
-        model,
-        ref_loader,
-        kd_loader,
-        parameter_space,
-        num_probes=args.num_probes,
-        probe_seed=args.probe_seed,
-        eta=args.probe_lr_eta,
-        output_path=output_path,
-        metadata=metadata,
-        save_intermediate_stats=args.save_intermediate_stats,
-        convergence_checkpoints=_parse_checkpoints(args.convergence_checkpoints, args.num_probes),
-    )
+    convergence_checkpoints = _parse_checkpoints(args.convergence_checkpoints, args.num_probes)
+    if world_size > 1:
+        compute_distributed_dense_pruning_scores(
+            model,
+            ref_loader,
+            kd_loader,
+            parameter_space,
+            num_probes=args.num_probes,
+            probe_seed=args.probe_seed,
+            eta=args.probe_lr_eta,
+            output_path=output_path,
+            metadata=metadata,
+            save_intermediate_stats=args.save_intermediate_stats,
+            convergence_checkpoints=convergence_checkpoints,
+            rank=rank,
+            world_size=world_size,
+            distributed_state_dir=args.distributed_state_dir,
+        )
+        dist.destroy_process_group()
+    else:
+        compute_dense_pruning_scores(
+            model,
+            ref_loader,
+            kd_loader,
+            parameter_space,
+            num_probes=args.num_probes,
+            probe_seed=args.probe_seed,
+            eta=args.probe_lr_eta,
+            output_path=output_path,
+            metadata=metadata,
+            save_intermediate_stats=args.save_intermediate_stats,
+            convergence_checkpoints=convergence_checkpoints,
+        )
     return 0
 
 

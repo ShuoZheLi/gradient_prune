@@ -62,6 +62,48 @@ default `all` is correct for ordinary full-model SFT. Use `transformer` or
 `candidates` only when the corresponding excluded parameters will actually be
 frozen during SFT.
 
+## Multi-node probe parallelism
+
+Use `torchrun` with `--distributed_probe_parallel` to distribute probes across
+one-GPU nodes. Every rank loads one complete dense model replica on its local
+GPU, receives a disjoint contiguous range of probe indices, and evaluates both
+the reference and KD HVP for those same probes. This is probe parallelism, not
+DDP/FSDP model sharding; second-order autodiff never crosses ranks.
+
+Each nonzero rank writes its local Welford state to shared storage. Rank zero
+merges the states with the exact parallel sample-covariance formula and is the
+only rank that writes convergence snapshots, diagnostics, and the final score
+file. The result is estimator-equivalent to sequential probe order up to normal
+floating-point reduction-order differences.
+
+```bash
+torchrun \
+  --nnodes="$NNODES" \
+  --nproc_per_node=1 \
+  --node_rank="$NODE_RANK" \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+  generate_recoverability_scores.py \
+  ... \
+  --device cuda:0 \
+  --distributed_probe_parallel \
+  --distributed_state_dir /shared/path/distributed_state
+```
+
+`num_probes` must be at least the world size. Distributed convergence snapshots
+can be written while rank zero is processing its own initial probe block and
+after each complete rank block is merged. For example, with 16 probes and four
+ranks, `2,4,8,12,16` are supported, while `6` is not.
+
+For Qwen3-8B's default seven candidate matrices, the three float32 Welford
+accumulators contain about 6.95B values each in aggregate. Plan for roughly
+80 GiB host RAM on every worker, over 200 GiB on rank zero during final score
+construction, and around 500 GiB of shared storage when intermediate tensors,
+four convergence snapshots, and temporary rank states coexist. Probe
+parallelism reduces elapsed probe time approximately in proportion to the
+number of nodes; it does not divide dataset batches among nodes or reduce these
+per-rank model/statistics requirements.
+
 ## Probe convergence
 
 ```bash

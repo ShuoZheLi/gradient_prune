@@ -30,7 +30,7 @@ def tensor_summary(tensor: torch.Tensor) -> dict[str, float | int | list[int]]:
     return summary
 
 
-def mapping_summary(values: Mapping[str, torch.Tensor]) -> dict[str, float | int]:
+def mapping_summary(values: Mapping[str, torch.Tensor], *, scale: float = 1.0) -> dict[str, float | int]:
     total = 0
     total_sum = 0.0
     total_square_sum = 0.0
@@ -38,6 +38,8 @@ def mapping_summary(values: Mapping[str, torch.Tensor]) -> dict[str, float | int
     maximum = -math.inf
     for tensor in values.values():
         value = tensor.detach().double()
+        if scale != 1.0:
+            value = value * scale
         total += value.numel()
         total_sum += float(value.sum().item())
         total_square_sum += float(value.square().sum().item())
