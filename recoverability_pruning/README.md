@@ -97,9 +97,11 @@ ranks, `2,4,8,12,16` are supported, while `6` is not.
 
 For Qwen3-8B's default seven candidate matrices, the three float32 Welford
 accumulators contain about 6.95B values each in aggregate. Plan for roughly
-80 GiB host RAM on every worker, over 200 GiB on rank zero during final score
-construction, and around 500 GiB of shared storage when intermediate tensors,
-four convergence snapshots, and temporary rank states coexist. Probe
+80 GiB host RAM on every worker and over 200 GiB on rank zero during final score
+construction. With four ranks, four convergence snapshots, and intermediate
+statistics enabled, peak shared storage is approximately 300 GiB because the
+temporary rank states are deleted incrementally before final output construction;
+leave additional filesystem headroom. Probe
 parallelism reduces elapsed probe time approximately in proportion to the
 number of nodes; it does not divide dataset batches among nodes or reduce these
 per-rank model/statistics requirements.
