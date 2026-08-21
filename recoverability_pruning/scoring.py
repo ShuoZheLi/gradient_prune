@@ -10,7 +10,13 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-from .diagnostics import final_diagnostics, gpu_memory_summary, mapping_summary
+from .diagnostics import (
+    final_diagnostics,
+    gpu_memory_summary,
+    host_memory_summary,
+    mapping_product_summary,
+    mapping_summary,
+)
 from .hvp import compute_dataset_hvp
 from .losses import causal_sft_nll
 from .online_stats import OnlineMeanCovariance
@@ -515,11 +521,10 @@ def run_single_probe_smoke_test(
         activation_offload=activation_offload,
         activation_offload_pin_memory=activation_offload_pin_memory,
     )
-    x_summary = mapping_summary(
-        {
-            name: reference_hvp[name] * probe[name].float()
-            for name in parameter_space.candidate_names
-        }
+    LOGGER.info("Smoke reference HVP host memory: %s", json.dumps(host_memory_summary(), sort_keys=True))
+    x_summary = mapping_product_summary(
+        reference_hvp,
+        {name: probe[name] for name in parameter_space.candidate_names},
     )
     del reference_hvp
     kd_hvp, kd_info = compute_dataset_hvp(
@@ -532,11 +537,10 @@ def run_single_probe_smoke_test(
         activation_offload=activation_offload,
         activation_offload_pin_memory=activation_offload_pin_memory,
     )
-    y_summary = mapping_summary(
-        {
-            name: kd_hvp[name] * probe[name].float()
-            for name in parameter_space.candidate_names
-        }
+    LOGGER.info("Smoke KD HVP host memory: %s", json.dumps(host_memory_summary(), sort_keys=True))
+    y_summary = mapping_product_summary(
+        kd_hvp,
+        {name: probe[name] for name in parameter_space.candidate_names},
     )
     del kd_hvp, probe
     return {
@@ -546,4 +550,5 @@ def run_single_probe_smoke_test(
         "x": x_summary,
         "y": y_summary,
         "gpu_memory": gpu_memory_summary(),
+        "host_memory": host_memory_summary(),
     }

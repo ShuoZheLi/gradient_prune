@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+import resource
 from collections import defaultdict
 from collections.abc import Mapping
 
@@ -53,6 +55,60 @@ def mapping_summary(values: Mapping[str, torch.Tensor], *, scale: float = 1.0) -
         "std": math.sqrt(variance),
         "min": minimum,
         "max": maximum,
+    }
+
+
+def mapping_product_summary(
+    left: Mapping[str, torch.Tensor],
+    right: Mapping[str, torch.Tensor],
+    *,
+    chunk_size: int = 4_194_304,
+) -> dict[str, float | int]:
+    if left.keys() != right.keys():
+        raise ValueError("Product summary mappings must have identical keys")
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    total = 0
+    total_sum = 0.0
+    total_square_sum = 0.0
+    minimum = math.inf
+    maximum = -math.inf
+    for name in left:
+        left_flat = left[name].detach().reshape(-1)
+        right_flat = right[name].detach().reshape(-1)
+        if left_flat.numel() != right_flat.numel():
+            raise ValueError(f"Product summary shape mismatch for {name}")
+        total += left_flat.numel()
+        for start in range(0, left_flat.numel(), chunk_size):
+            stop = min(start + chunk_size, left_flat.numel())
+            product = left_flat[start:stop].to(dtype=torch.float64)
+            product.mul_(right_flat[start:stop])
+            total_sum += float(product.sum().item())
+            total_square_sum += float(product.square().sum().item())
+            minimum = min(minimum, float(product.min().item()))
+            maximum = max(maximum, float(product.max().item()))
+    if total == 0:
+        raise ValueError("Cannot summarize an empty tensor mapping")
+    mean = total_sum / total
+    variance = max(0.0, total_square_sum / total - mean * mean)
+    return {
+        "numel": total,
+        "mean": mean,
+        "std": math.sqrt(variance),
+        "min": minimum,
+        "max": maximum,
+    }
+
+
+def host_memory_summary() -> dict[str, float]:
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    with open("/proc/self/statm", encoding="utf-8") as handle:
+        fields = handle.read().split()
+    current_rss_gib = int(fields[1]) * page_size / 2**30
+    peak_rss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return {
+        "current_rss_gib": current_rss_gib,
+        "peak_rss_gib": peak_rss_kib / 2**20,
     }
 
 

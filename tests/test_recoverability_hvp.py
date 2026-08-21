@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from recoverability_pruning import hvp as hvp_module
+from recoverability_pruning.diagnostics import mapping_product_summary, mapping_summary
 from recoverability_pruning.hvp import compute_batch_hvp, compute_dataset_hvp
 from recoverability_pruning.losses import causal_sft_nll
 from recoverability_pruning.params import build_parameter_space
@@ -109,6 +110,23 @@ def test_cpu_activation_offload_matches_standard_hvp():
     )
     assert standard_tokens == offloaded_tokens == 4
     torch.testing.assert_close(offloaded["transition.weight"], standard["transition.weight"])
+
+
+def test_chunked_product_summary_matches_materialized_product():
+    torch.manual_seed(17)
+    left = {
+        "first": torch.randn(5, 7),
+        "second": torch.randn(3, 4),
+    }
+    right = {
+        "first": torch.randint(0, 2, (5, 7), dtype=torch.int8).mul_(2).sub_(1),
+        "second": torch.randint(0, 2, (3, 4), dtype=torch.int8).mul_(2).sub_(1),
+    }
+    expected = mapping_summary({name: left[name] * right[name] for name in left})
+    actual = mapping_product_summary(left, right, chunk_size=6)
+    assert actual["numel"] == expected["numel"]
+    for key in ("mean", "std", "min", "max"):
+        assert abs(float(actual[key]) - float(expected[key])) < 1e-7
 
 
 def test_causal_nll_respects_shifted_label_mask():
