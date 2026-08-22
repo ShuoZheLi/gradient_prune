@@ -42,7 +42,7 @@ def test_loss_sum_gradient_rescaling_is_batch_partition_invariant():
     linear = nn.Linear(3, 2, bias=False)
     inputs = torch.randn(2, 3, 3)
     targets = torch.randn(2, 3, 2)
-    attention_mask = torch.ones(2, 3, dtype=torch.bool)
+    attention_mask = torch.tensor([[1, 1, 1], [0, 1, 1]], dtype=torch.bool)
 
     def collect(batch_slices):
         linear.zero_grad(set_to_none=True)
@@ -54,7 +54,7 @@ def test_loss_sum_gradient_rescaling_is_batch_partition_invariant():
                 num_tokens = int(batch_mask.sum().item())
                 collector.set_batch(batch_mask, loss_scale=float(num_tokens))
                 output = linear(batch_inputs)
-                loss = 0.5 * (output - batch_targets).square().sum() / num_tokens
+                loss = 0.5 * (output - batch_targets)[batch_mask].square().sum() / num_tokens
                 loss.backward()
                 collector.clear_batch()
                 linear.zero_grad(set_to_none=True)

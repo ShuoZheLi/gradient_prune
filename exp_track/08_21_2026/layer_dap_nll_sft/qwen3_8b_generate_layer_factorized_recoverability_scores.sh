@@ -84,11 +84,13 @@ MAX_LENGTH="${MAX_LENGTH:-9216}"
 REF_BATCH_SIZE="${REF_BATCH_SIZE:-1}"
 KD_BATCH_SIZE="${KD_BATCH_SIZE:-1}"
 DTYPE="${DTYPE:-bf16}"
-LOSS_ON="${LOSS_ON:-response_only}"
+LOSS_ON="${LOSS_ON:-full_trajectory}"
 CANDIDATE_MODULES="${CANDIDATE_MODULES:-q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj}"
 LAYER_GROUP_SIZE="${LAYER_GROUP_SIZE:-1}"
 FACTOR_STORAGE_DEVICE="${FACTOR_STORAGE_DEVICE:-cpu}"
 FACTOR_CHUNK_SIZE="${FACTOR_CHUNK_SIZE:-2048}"
+ACTIVATION_OFFLOAD="${ACTIVATION_OFFLOAD:-cpu}"
+ACTIVATION_OFFLOAD_PIN_MEMORY="${ACTIVATION_OFFLOAD_PIN_MEMORY:-0}"
 ATTENTION_IMPLEMENTATION="${ATTENTION_IMPLEMENTATION:-sdpa}"
 DIAGNOSTIC_BATCHES="${DIAGNOSTIC_BATCHES:-1}"
 SAVE_FACTOR_DIAGNOSTICS="${SAVE_FACTOR_DIAGNOSTICS:-0}"
@@ -135,6 +137,7 @@ COMMON_ARGS=(
   --factor_structure full
   --factor_storage_device "$FACTOR_STORAGE_DEVICE"
   --factor_chunk_size "$FACTOR_CHUNK_SIZE"
+  --activation_offload "$ACTIVATION_OFFLOAD"
   --dtype "$DTYPE"
   --device cuda:0
   --loss_on "$LOSS_ON"
@@ -153,6 +156,9 @@ if [[ "$SHUFFLE_DATASETS" == "1" ]]; then
 fi
 if [[ "$SAVE_FACTOR_DIAGNOSTICS" == "1" ]]; then
   COMMON_ARGS+=(--save_factor_diagnostics)
+fi
+if [[ "$ACTIVATION_OFFLOAD_PIN_MEMORY" == "1" ]]; then
+  COMMON_ARGS+=(--activation_offload_pin_memory)
 fi
 
 echo "[layer_dap] nodes=$NNODES world_size=$WORLD_SIZE layer_group_size=$LAYER_GROUP_SIZE"
@@ -186,6 +192,7 @@ if [[ "$RUN_SMOKE_FIRST" == "1" ]]; then
     --factor_structure full \
     --factor_storage_device "$FACTOR_STORAGE_DEVICE" \
     --factor_chunk_size "$FACTOR_CHUNK_SIZE" \
+    --activation_offload "$ACTIVATION_OFFLOAD" \
     --dtype "$DTYPE" \
     --device cuda:0 \
     --attention_implementation "$ATTENTION_IMPLEMENTATION" \

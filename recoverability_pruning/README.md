@@ -23,6 +23,7 @@ python generate_layer_factorized_recoverability_scores.py \
   --candidate_modules q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   --layer_group_size 1 \
   --factor_storage_device cpu \
+  --activation_offload cpu \
   --loss_on full_trajectory
 ```
 
@@ -36,6 +37,11 @@ For distributed layer sharding, launch one complete model replica per rank with
 `torchrun` and add `--distributed_layer_sharding`. Layer groups are assigned to
 ranks without factor synchronization; rank zero merges only the small rank
 manifests after all score shards have been written.
+
+For long-context models, `--activation_offload cpu` moves tensors saved for the
+ordinary backward pass to host memory. This does not alter hook values or use
+second-order autograd, but it trades runtime and host bandwidth for lower GPU
+activation memory.
 
 The cluster launcher is:
 

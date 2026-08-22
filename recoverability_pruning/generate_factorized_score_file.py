@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--factor_structure", choices=["full", "block", "diagonal_g"], default="full")
     parser.add_argument("--factor_storage_device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--factor_chunk_size", type=int, default=2048)
+    parser.add_argument("--activation_offload", choices=["none", "cpu"], default="none")
+    parser.add_argument("--activation_offload_pin_memory", action="store_true")
     parser.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default="bf16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--loss_on", choices=["full_trajectory", "response_only", "loss_mask"], required=True)
@@ -274,10 +276,20 @@ def main() -> int:
                 module.out_features * module.out_features * 4 / 2**20,
             )
         ref_fixed_point = compute_group_gradient_diagnostic(
-            model, ref_loader, group, max_batches=args.diagnostic_batches
+            model,
+            ref_loader,
+            group,
+            max_batches=args.diagnostic_batches,
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
         kd_fixed_point = compute_group_gradient_diagnostic(
-            model, kd_loader, group, max_batches=args.diagnostic_batches
+            model,
+            kd_loader,
+            group,
+            max_batches=args.diagnostic_batches,
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
         ref_factors, ref_pass = collect_dataset_factors(
             model,
@@ -286,6 +298,8 @@ def main() -> int:
             storage_device=storage_device,
             chunk_size=args.factor_chunk_size,
             dataset_name="reference",
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
         kd_factors, kd_pass = collect_dataset_factors(
             model,
@@ -294,6 +308,8 @@ def main() -> int:
             storage_device=storage_device,
             chunk_size=args.factor_chunk_size,
             dataset_name="kd",
+            activation_offload=args.activation_offload,
+            activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
 
         for name, module in group.items():
@@ -360,6 +376,8 @@ def main() -> int:
         "dtype_model": args.dtype,
         "dtype_factor_accumulation": "float32",
         "factor_storage_device": args.factor_storage_device,
+        "activation_offload": args.activation_offload,
+        "activation_offload_pin_memory": args.activation_offload_pin_memory,
         "loss_masking": args.loss_on,
         "max_length": args.max_length,
         "num_ref_examples": len(reference_dataset),

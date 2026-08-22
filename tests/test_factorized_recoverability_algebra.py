@@ -36,3 +36,27 @@ def test_factorized_score_matches_explicit_kronecker_hessians():
     assert torch.allclose(tensors["h_ref"].reshape(-1).double(), diagonal_ref, atol=1e-5, rtol=1e-5)
     assert torch.allclose(tensors["rho"].reshape(-1).double(), rho_exact, atol=2e-4, rtol=1e-5)
     assert torch.allclose(tensors["score"].reshape(-1).double(), score_exact, atol=2e-4, rtol=1e-5)
+
+
+def test_cross_factor_diagonal_uses_transposed_second_factor():
+    generator = torch.Generator().manual_seed(23)
+    d_out = 2
+    d_in = 3
+    activation_ref = torch.randn(d_in, d_in, generator=generator, dtype=torch.float64)
+    activation_kd = torch.randn(d_in, d_in, generator=generator, dtype=torch.float64)
+    gradient_ref = torch.randn(d_out, d_out, generator=generator, dtype=torch.float64)
+    gradient_kd = torch.randn(d_out, d_out, generator=generator, dtype=torch.float64)
+    weight = torch.randn(d_out, d_in, generator=generator, dtype=torch.float64)
+
+    hessian_ref = torch.kron(gradient_ref, activation_ref)
+    hessian_kd = torch.kron(gradient_kd, activation_kd)
+    rho_exact = (
+        torch.diagonal(hessian_ref @ hessian_kd)
+        - torch.diagonal(hessian_ref) * torch.diagonal(hessian_kd)
+    )
+
+    ref = FactorPair(activation_ref, gradient_ref, 1, 1)
+    kd = FactorPair(activation_kd, gradient_kd, 1, 1)
+    tensors = factorized_score_tensors(weight, ref, kd, eta=0.1)
+
+    assert torch.allclose(tensors["rho"].reshape(-1).double(), rho_exact, atol=1e-5, rtol=1e-5)

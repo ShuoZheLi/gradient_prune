@@ -5,12 +5,13 @@ import math
 import resource
 import time
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from .losses import causal_sft_nll
+from .losses import IGNORE_INDEX, causal_sft_nll
 
 
 LOGGER = logging.getLogger(__name__)
@@ -27,6 +28,19 @@ def move_batch(batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[
 def process_peak_cpu_memory_bytes() -> int:
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(peak * (1024 if peak < 10**10 else 1))
+
+
+def saved_tensor_context(
+    activation_offload: str,
+    *,
+    pin_memory: bool,
+    input_device: torch.device,
+):
+    if activation_offload == "none" or input_device.type != "cuda":
+        return nullcontext()
+    if activation_offload == "cpu":
+        return torch.autograd.graph.save_on_cpu(pin_memory=pin_memory, device_type="cuda")
+    raise ValueError(f"Unsupported activation_offload={activation_offload!r}")
 
 
 @dataclass
@@ -198,6 +212,8 @@ def collect_dataset_factors(
     storage_device: torch.device,
     chunk_size: int,
     dataset_name: str,
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> tuple[dict[str, FactorPair], dict[str, float | int]]:
     prepare_model_for_factor_collection(model)
     total_loss_sum = 0.0
@@ -211,12 +227,17 @@ def collect_dataset_factors(
         for batch_index, batch in enumerate(dataloader):
             model.zero_grad(set_to_none=True)
             moved_batch = move_batch(batch, model_input_device(model))
-            supervised_tokens = int(moved_batch["labels"][:, 1:].ne(-100).sum().item())
+            supervised_tokens = int(moved_batch["labels"][:, 1:].ne(IGNORE_INDEX).sum().item())
             collector.set_batch(moved_batch["attention_mask"], loss_scale=float(supervised_tokens))
-            result = causal_sft_nll(model, moved_batch)
-            if result.num_tokens != supervised_tokens:
-                raise RuntimeError("Supervised-token count changed between hook setup and NLL computation")
-            result.loss.backward()
+            with saved_tensor_context(
+                activation_offload,
+                pin_memory=activation_offload_pin_memory,
+                input_device=model_input_device(model),
+            ):
+                result = causal_sft_nll(model, moved_batch)
+                if result.num_tokens != supervised_tokens:
+                    raise RuntimeError("Supervised-token count changed between hook setup and NLL computation")
+                result.loss.backward()
             collector.clear_batch()
             model.zero_grad(set_to_none=True)
 
@@ -242,6 +263,8 @@ def collect_dataset_factors(
         "num_examples": total_examples,
         "runtime_seconds": elapsed,
         "peak_cpu_memory_bytes": process_peak_cpu_memory_bytes(),
+        "activation_offload": activation_offload,
+        "activation_offload_pin_memory": activation_offload_pin_memory,
     }
     if torch.cuda.is_available():
         diagnostics["peak_gpu_memory_bytes"] = int(torch.cuda.max_memory_allocated())
@@ -254,6 +277,8 @@ def compute_group_gradient_diagnostic(
     modules: Mapping[str, nn.Linear],
     *,
     max_batches: int,
+    activation_offload: str = "none",
+    activation_offload_pin_memory: bool = False,
 ) -> dict[str, float | int]:
     if max_batches <= 0:
         return {}
@@ -275,8 +300,13 @@ def compute_group_gradient_diagnostic(
             break
         model.zero_grad(set_to_none=True)
         moved_batch = move_batch(batch, model_input_device(model))
-        result = causal_sft_nll(model, moved_batch)
-        result.loss.backward()
+        with saved_tensor_context(
+            activation_offload,
+            pin_memory=activation_offload_pin_memory,
+            input_device=model_input_device(model),
+        ):
+            result = causal_sft_nll(model, moved_batch)
+            result.loss.backward()
         for name, parameter in selected_parameters.items():
             if parameter.grad is not None:
                 gradient_sums[name].add_(parameter.grad.detach().float().cpu(), alpha=result.num_tokens)
