@@ -5,7 +5,7 @@
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=12:00:00
+#SBATCH --time=14:00:00
 #SBATCH --output=slurm-%j_qwen3_8b_layer_dap.out
 #SBATCH --error=slurm-%j_qwen3_8b_layer_dap.err
 
@@ -58,7 +58,8 @@ unset MASTER_ADDR MASTER_PORT WORLD_SIZE RANK LOCAL_RANK GROUP_RANK ROLE_RANK RO
 
 MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
 REF_DATASET_PATH="${REF_DATASET_PATH:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}"
-KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
+# KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
+KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct/qwen3-8b-instruct_math7500_correct.parquet}"
 
 RUN_NAME="${RUN_NAME:-qwen3_8b_layer_dap_nll_sft}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
@@ -79,7 +80,7 @@ done
 
 ETA="${ETA:-1e-5}"
 MAX_REF_SAMPLES="${MAX_REF_SAMPLES:-all}"
-MAX_KD_SAMPLES="${MAX_KD_SAMPLES:-1000}"
+MAX_KD_SAMPLES="${MAX_KD_SAMPLES:-600}"
 MAX_LENGTH="${MAX_LENGTH:-9216}"
 REF_BATCH_SIZE="${REF_BATCH_SIZE:-1}"
 KD_BATCH_SIZE="${KD_BATCH_SIZE:-1}"
