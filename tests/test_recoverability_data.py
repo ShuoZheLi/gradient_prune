@@ -22,8 +22,38 @@ def test_full_trajectory_uses_provided_token_ids(tmp_path):
 
 def test_response_only_refuses_to_infer_prompt_boundary(tmp_path):
     path = _write_parquet(tmp_path, "missing_boundary.parquet", [{"prompt_generated_trajectory_ids": [1, 2, 3]}])
-    with pytest.raises(ValueError, match="will not be inferred"):
+    with pytest.raises(ValueError, match="explicitly enable verified derivation"):
         load_trajectory_dataset(path, loss_on="response_only")
+
+
+def test_response_only_can_derive_verified_prompt_token_prefix(tmp_path):
+    path = _write_parquet(
+        tmp_path,
+        "derived_boundary.parquet",
+        [{"prompt": "question", "prompt_generated_trajectory_ids": [1, 2, 3, 4]}],
+    )
+    dataset = load_trajectory_dataset(
+        path,
+        loss_on="response_only",
+        derive_prompt_length_from_prompt=True,
+        prompt_tokenizer=lambda prompt: [1, 2] if prompt == "question" else [],
+    )
+    assert dataset.examples[0].labels == (IGNORE_INDEX, IGNORE_INDEX, 3, 4)
+
+
+def test_response_only_derivation_rejects_non_prefix_prompt_tokens(tmp_path):
+    path = _write_parquet(
+        tmp_path,
+        "bad_derived_boundary.parquet",
+        [{"prompt": "question", "prompt_generated_trajectory_ids": [1, 9, 3, 4]}],
+    )
+    with pytest.raises(ValueError, match="not an exact prefix"):
+        load_trajectory_dataset(
+            path,
+            loss_on="response_only",
+            derive_prompt_length_from_prompt=True,
+            prompt_tokenizer=lambda prompt: [1, 2],
+        )
 
 
 def test_response_only_and_loss_mask_are_explicit(tmp_path):

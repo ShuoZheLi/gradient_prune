@@ -79,12 +79,14 @@ done
 
 ETA="${ETA:-1e-5}"
 MAX_REF_SAMPLES="${MAX_REF_SAMPLES:-all}"
-MAX_KD_SAMPLES="${MAX_KD_SAMPLES:-all}"
+MAX_KD_SAMPLES="${MAX_KD_SAMPLES:-1000}"
 MAX_LENGTH="${MAX_LENGTH:-9216}"
-REF_BATCH_SIZE="${REF_BATCH_SIZE:-1}"
-KD_BATCH_SIZE="${KD_BATCH_SIZE:-1}"
+REF_BATCH_SIZE="${REF_BATCH_SIZE:-2}"
+KD_BATCH_SIZE="${KD_BATCH_SIZE:-2}"
 DTYPE="${DTYPE:-bf16}"
-LOSS_ON="${LOSS_ON:-full_trajectory}"
+LOSS_ON="${LOSS_ON:-response_only}"
+DERIVE_PROMPT_LENGTH_FROM_PROMPT="${DERIVE_PROMPT_LENGTH_FROM_PROMPT:-1}"
+PROMPT_TEXT_COLUMN="${PROMPT_TEXT_COLUMN:-prompt}"
 CANDIDATE_MODULES="${CANDIDATE_MODULES:-q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj}"
 LAYER_GROUP_SIZE="${LAYER_GROUP_SIZE:-1}"
 FACTOR_STORAGE_DEVICE="${FACTOR_STORAGE_DEVICE:-cpu}"
@@ -96,8 +98,8 @@ DIAGNOSTIC_BATCHES="${DIAGNOSTIC_BATCHES:-1}"
 SAVE_FACTOR_DIAGNOSTICS="${SAVE_FACTOR_DIAGNOSTICS:-0}"
 SHUFFLE_DATASETS="${SHUFFLE_DATASETS:-1}"
 SEED="${SEED:-42}"
-RUN_SMOKE_FIRST="${RUN_SMOKE_FIRST:-1}"
-SMOKE_MAX_LENGTH="${SMOKE_MAX_LENGTH:-128}"
+RUN_SMOKE_FIRST="${RUN_SMOKE_FIRST:-0}"
+SMOKE_MAX_LENGTH="${SMOKE_MAX_LENGTH:-2048}"
 SMOKE_MODULE_NAME="${SMOKE_MODULE_NAME:-model.layers.0.self_attn.q_proj}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
@@ -141,6 +143,7 @@ COMMON_ARGS=(
   --dtype "$DTYPE"
   --device cuda:0
   --loss_on "$LOSS_ON"
+  --prompt_text_column "$PROMPT_TEXT_COLUMN"
   --attention_implementation "$ATTENTION_IMPLEMENTATION"
   --diagnostic_batches "$DIAGNOSTIC_BATCHES"
   --seed "$SEED"
@@ -160,13 +163,20 @@ fi
 if [[ "$ACTIVATION_OFFLOAD_PIN_MEMORY" == "1" ]]; then
   COMMON_ARGS+=(--activation_offload_pin_memory)
 fi
+if [[ "$DERIVE_PROMPT_LENGTH_FROM_PROMPT" == "1" ]]; then
+  COMMON_ARGS+=(--derive_prompt_length_from_prompt)
+fi
 
 echo "[layer_dap] nodes=$NNODES world_size=$WORLD_SIZE layer_group_size=$LAYER_GROUP_SIZE"
 echo "[layer_dap] score_dir=$SCORE_DIR"
-echo "[layer_dap] LOSS_ON=$LOSS_ON; these datasets have no prompt_length/loss_mask, so full_trajectory is required."
+echo "[layer_dap] LOSS_ON=$LOSS_ON derive_prompt_length_from_prompt=$DERIVE_PROMPT_LENGTH_FROM_PROMPT"
 
 if [[ "$RUN_SMOKE_FIRST" == "1" ]]; then
   rm -rf "$SMOKE_DIR"
+  SMOKE_BOUNDARY_ARGS=()
+  if [[ "$DERIVE_PROMPT_LENGTH_FROM_PROMPT" == "1" ]]; then
+    SMOKE_BOUNDARY_ARGS+=(--derive_prompt_length_from_prompt)
+  fi
   srun --nodes=1 --ntasks=1 --ntasks-per-node=1 -w "$head_node" \
     bash -c '
       set -euo pipefail
@@ -183,6 +193,7 @@ if [[ "$RUN_SMOKE_FIRST" == "1" ]]; then
     --output_dir "$SMOKE_DIR" \
     --eta "$ETA" \
     --loss_on "$LOSS_ON" \
+    --prompt_text_column "$PROMPT_TEXT_COLUMN" \
     --max_ref_samples 1 \
     --max_kd_samples 1 \
     --max_length "$SMOKE_MAX_LENGTH" \
@@ -198,7 +209,8 @@ if [[ "$RUN_SMOKE_FIRST" == "1" ]]; then
     --attention_implementation "$ATTENTION_IMPLEMENTATION" \
     --diagnostic_batches 1 \
     --seed "$SEED" \
-    --save_factor_diagnostics
+    --save_factor_diagnostics \
+    "${SMOKE_BOUNDARY_ARGS[@]}"
   echo "[layer_dap] one-layer smoke test passed: $SMOKE_DIR"
 fi
 

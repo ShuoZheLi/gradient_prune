@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token_ids_column", default="prompt_generated_trajectory_ids")
     parser.add_argument("--prompt_length_column", default="prompt_length")
     parser.add_argument("--loss_mask_column", default="loss_mask")
+    parser.add_argument("--prompt_text_column", default="prompt")
+    parser.add_argument("--derive_prompt_length_from_prompt", action="store_true")
     parser.add_argument("--disjoint_key_column", default="prompt")
     parser.add_argument("--truncation_side", choices=["left", "right"], default="right")
     parser.add_argument("--shuffle_ref", action="store_true")
@@ -92,12 +94,16 @@ def initialize_distributed(args: argparse.Namespace) -> tuple[int, int]:
     return rank, world_size
 
 
-def load_model(args: argparse.Namespace):
+def load_tokenizer(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
             raise ValueError("Tokenizer has neither pad_token_id nor eos_token_id")
         tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
+def load_model(args: argparse.Namespace, tokenizer):
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=resolve_dtype(args.dtype),
@@ -112,6 +118,18 @@ def load_model(args: argparse.Namespace):
         model.gradient_checkpointing_disable()
     model.eval()
     return model, tokenizer
+
+
+def prompt_tokenizer(tokenizer):
+    def tokenize(prompt: str) -> list[int]:
+        return tokenizer(
+            prompt,
+            add_special_tokens=True,
+            return_attention_mask=False,
+            return_token_type_ids=False,
+        )["input_ids"]
+
+    return tokenize
 
 
 def candidate_linear_modules(
@@ -208,12 +226,20 @@ def main() -> int:
     if Path(args.ref_dataset_path).resolve() == Path(args.kd_dataset_path).resolve():
         raise ValueError("Reference and KD dataset paths must differ")
 
+    tokenizer = load_tokenizer(args)
+    boundary_tokenizer = (
+        prompt_tokenizer(tokenizer) if args.derive_prompt_length_from_prompt else None
+    )
+
     reference_dataset = load_trajectory_dataset(
         args.ref_dataset_path,
         token_ids_column=args.token_ids_column,
         loss_on=args.loss_on,
         prompt_length_column=args.prompt_length_column,
         loss_mask_column=args.loss_mask_column,
+        prompt_text_column=args.prompt_text_column,
+        derive_prompt_length_from_prompt=args.derive_prompt_length_from_prompt,
+        prompt_tokenizer=boundary_tokenizer,
         disjoint_key_column=args.disjoint_key_column,
         max_length=args.max_length,
         truncation_side=args.truncation_side,
@@ -227,6 +253,9 @@ def main() -> int:
         loss_on=args.loss_on,
         prompt_length_column=args.prompt_length_column,
         loss_mask_column=args.loss_mask_column,
+        prompt_text_column=args.prompt_text_column,
+        derive_prompt_length_from_prompt=args.derive_prompt_length_from_prompt,
+        prompt_tokenizer=boundary_tokenizer,
         disjoint_key_column=args.disjoint_key_column,
         max_length=args.max_length,
         truncation_side=args.truncation_side,
@@ -235,7 +264,7 @@ def main() -> int:
         seed=args.seed + 1,
     )
     assert_disjoint_datasets(reference_dataset, kd_dataset)
-    model, tokenizer = load_model(args)
+    model, tokenizer = load_model(args, tokenizer)
     patterns = parse_module_patterns(args.candidate_modules)
     modules = candidate_linear_modules(model, patterns, args.module_names)
     all_groups = group_modules(modules, args.layer_group_size)
@@ -379,6 +408,9 @@ def main() -> int:
         "activation_offload": args.activation_offload,
         "activation_offload_pin_memory": args.activation_offload_pin_memory,
         "loss_masking": args.loss_on,
+        "prompt_length_column": args.prompt_length_column if args.loss_on == "response_only" else None,
+        "prompt_text_column": args.prompt_text_column if args.derive_prompt_length_from_prompt else None,
+        "derive_prompt_length_from_prompt": args.derive_prompt_length_from_prompt,
         "max_length": args.max_length,
         "num_ref_examples": len(reference_dataset),
         "num_kd_examples": len(kd_dataset),

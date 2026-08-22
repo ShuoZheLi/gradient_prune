@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Sequence
 
 import pandas as pd
@@ -107,17 +108,51 @@ def _build_labels(
     loss_on: str,
     prompt_length_column: str,
     loss_mask_column: str,
+    prompt_text_column: str,
+    derive_prompt_length_from_prompt: bool,
+    prompt_tokenizer: Callable[[str], Sequence[int]] | None,
+    prompt_token_cache: dict[str, tuple[int, ...]],
     row_index: int,
 ) -> list[int]:
     if loss_on == "full_trajectory":
         return list(token_ids)
     if loss_on == "response_only":
-        if prompt_length_column not in row or _is_missing(row[prompt_length_column]):
+        if prompt_length_column in row and not _is_missing(row[prompt_length_column]):
+            prompt_length = int(row[prompt_length_column])
+        elif derive_prompt_length_from_prompt:
+            if prompt_tokenizer is None:
+                raise ValueError("Prompt-length derivation requires a tokenizer")
+            if prompt_text_column not in row or _is_missing(row[prompt_text_column]):
+                raise ValueError(
+                    f"Prompt-length derivation requires explicit text column {prompt_text_column!r}"
+                )
+            prompt_text = str(row[prompt_text_column])
+            prompt_ids = prompt_token_cache.get(prompt_text)
+            if prompt_ids is None:
+                prompt_ids = tuple(int(token_id) for token_id in prompt_tokenizer(prompt_text))
+                prompt_token_cache[prompt_text] = prompt_ids
+            prompt_length = len(prompt_ids)
+            if token_ids[:prompt_length] != list(prompt_ids):
+                mismatch = next(
+                    (
+                        index
+                        for index, (trajectory_id, prompt_id) in enumerate(
+                            zip(token_ids, prompt_ids, strict=False)
+                        )
+                        if trajectory_id != prompt_id
+                    ),
+                    min(len(token_ids), len(prompt_ids)),
+                )
+                raise ValueError(
+                    f"Tokenized {prompt_text_column!r} is not an exact prefix of {len(token_ids)} stored "
+                    f"trajectory IDs at row {row_index}; first mismatch index={mismatch}. "
+                    "Refusing to infer a response boundary."
+                )
+        else:
             raise ValueError(
                 f"loss_on='response_only' requires explicit column {prompt_length_column!r}; "
-                "the prompt boundary will not be inferred from text"
+                "or explicitly enable verified derivation from prompt text"
             )
-        prompt_length = int(row[prompt_length_column])
         if not 0 <= prompt_length <= len(token_ids):
             raise ValueError(
                 f"Invalid prompt length {prompt_length} for {len(token_ids)} tokens at row {row_index}"
@@ -157,6 +192,9 @@ def load_trajectory_dataset(
     loss_on: str = "full_trajectory",
     prompt_length_column: str = "prompt_length",
     loss_mask_column: str = "loss_mask",
+    prompt_text_column: str = "prompt",
+    derive_prompt_length_from_prompt: bool = False,
+    prompt_tokenizer: Callable[[str], Sequence[int]] | None = None,
     disjoint_key_column: str | None = "prompt",
     max_length: int = 4096,
     truncation_side: str = "right",
@@ -167,10 +205,13 @@ def load_trajectory_dataset(
     requested_columns = [token_ids_column]
     if loss_on == "response_only":
         requested_columns.append(prompt_length_column)
+        if derive_prompt_length_from_prompt:
+            requested_columns.append(prompt_text_column)
     elif loss_on == "loss_mask":
         requested_columns.append(loss_mask_column)
     if disjoint_key_column:
         requested_columns.append(disjoint_key_column)
+    requested_columns = list(dict.fromkeys(requested_columns))
     frame = _load_dataframe(path, columns=requested_columns)
     if token_ids_column not in frame.columns:
         raise ValueError(f"Dataset {path} does not contain required column {token_ids_column!r}")
@@ -182,6 +223,7 @@ def load_trajectory_dataset(
         frame = frame.head(max_samples)
 
     examples = []
+    prompt_token_cache: dict[str, tuple[int, ...]] = {}
     for row_index, (_, row) in enumerate(frame.iterrows()):
         full_token_ids = _as_int_list(row[token_ids_column], token_ids_column, row_index)
         if len(full_token_ids) < 2:
@@ -192,6 +234,10 @@ def load_trajectory_dataset(
             loss_on=loss_on,
             prompt_length_column=prompt_length_column,
             loss_mask_column=loss_mask_column,
+            prompt_text_column=prompt_text_column,
+            derive_prompt_length_from_prompt=derive_prompt_length_from_prompt,
+            prompt_tokenizer=prompt_tokenizer,
+            prompt_token_cache=prompt_token_cache,
             row_index=row_index,
         )
         token_ids, labels = _truncate(full_token_ids, labels, max_length, truncation_side)

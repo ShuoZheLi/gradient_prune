@@ -24,8 +24,17 @@ python generate_layer_factorized_recoverability_scores.py \
   --layer_group_size 1 \
   --factor_storage_device cpu \
   --activation_offload cpu \
-  --loss_on full_trajectory
+  --loss_on response_only \
+  --derive_prompt_length_from_prompt
 ```
+
+The supplied Qwen parquet files contain the exact chat-template `prompt` text
+used to create `prompt_generated_trajectory = prompt + response`. They do not
+contain a numeric `prompt_length`, so response-only scoring must explicitly use
+`--derive_prompt_length_from_prompt`. The loader tokenizes each distinct prompt
+with the scoring checkpoint tokenizer and requires those IDs to be an exact
+prefix of every stored trajectory. Any mismatch is a hard error rather than a
+silently inferred boundary.
 
 Each candidate weight gets one safetensor shard containing `score`, `damage`,
 and `recovery`. `manifest.json` records exact parameter names, dimensions,
@@ -57,10 +66,9 @@ It performs a one-layer smoke test before starting the distributed full job.
 reference/KD recovery covariance with shared Rademacher probes. It never modifies
 or prunes the checkpoint.
 
-The supplied trajectory parquet files do not contain prompt boundaries or loss
-masks. Use `--loss_on full_trajectory` for those files. The CLI rejects
-`response_only` unless an explicit `prompt_length` column exists, and rejects
-`loss_mask` unless an explicit mask column exists.
+The full-HVP implementation still requires an explicit numeric prompt boundary
+for `response_only`; the verified prompt-text derivation described above is
+currently implemented in the layer-factorized CLI.
 
 ## Required smoke test
 
