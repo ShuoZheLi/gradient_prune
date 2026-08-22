@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import pandas as pd
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -44,12 +45,20 @@ def _is_missing(value: Any) -> bool:
     return bool(result) if isinstance(result, bool) else False
 
 
-def _load_dataframe(path: str | Path) -> pd.DataFrame:
+def _available_parquet_columns(path: Path) -> set[str]:
+    return set(pq.read_schema(path).names)
+
+
+def _load_dataframe(path: str | Path, *, columns: Sequence[str] | None = None) -> pd.DataFrame:
     dataset_path = Path(path).expanduser()
     if dataset_path.is_dir():
         parquet_files = sorted(dataset_path.glob("*.parquet"))
         if parquet_files:
-            return pd.concat([pd.read_parquet(item) for item in parquet_files], ignore_index=True)
+            frames = []
+            for item in parquet_files:
+                selected = [column for column in columns or () if column in _available_parquet_columns(item)]
+                frames.append(pd.read_parquet(item, columns=selected or None))
+            return pd.concat(frames, ignore_index=True)
         jsonl_files = sorted(dataset_path.glob("*.jsonl"))
         if jsonl_files:
             records = []
@@ -59,7 +68,8 @@ def _load_dataframe(path: str | Path) -> pd.DataFrame:
             return pd.DataFrame(records)
         raise ValueError(f"No parquet or jsonl files found in dataset directory: {dataset_path}")
     if dataset_path.suffix == ".parquet":
-        return pd.read_parquet(dataset_path)
+        selected = [column for column in columns or () if column in _available_parquet_columns(dataset_path)]
+        return pd.read_parquet(dataset_path, columns=selected or None)
     if dataset_path.suffix == ".jsonl":
         with dataset_path.open("r", encoding="utf-8") as handle:
             return pd.DataFrame(json.loads(line) for line in handle if line.strip())
@@ -154,7 +164,14 @@ def load_trajectory_dataset(
     shuffle: bool = False,
     seed: int = 42,
 ) -> TrajectoryDataset:
-    frame = _load_dataframe(path)
+    requested_columns = [token_ids_column]
+    if loss_on == "response_only":
+        requested_columns.append(prompt_length_column)
+    elif loss_on == "loss_mask":
+        requested_columns.append(loss_mask_column)
+    if disjoint_key_column:
+        requested_columns.append(disjoint_key_column)
+    frame = _load_dataframe(path, columns=requested_columns)
     if token_ids_column not in frame.columns:
         raise ValueError(f"Dataset {path} does not contain required column {token_ids_column!r}")
     if shuffle:

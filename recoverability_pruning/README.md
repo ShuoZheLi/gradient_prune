@@ -1,5 +1,52 @@
 # Recoverability-aware pruning scores
 
+## Layer-factorized implementation
+
+`generate_layer_factorized_recoverability_scores.py` is the correctness-first
+layer-local implementation. It uses ordinary forward/backward hooks to collect
+activation and output-gradient second moments, never requests higher-order
+autograd, and never constructs a Kronecker Hessian.
+
+The scalar NLL is token-mean normalized. Before accumulating `G`, hook gradients
+are multiplied by the number of supervised tokens in the current batch. This
+recovers gradients of the token-sum loss and prevents `G` from changing merely
+because the same examples are partitioned into different batch sizes. Both `A`
+and `G` are then divided by their number of non-padding sequence positions.
+
+```bash
+python generate_layer_factorized_recoverability_scores.py \
+  --model_path /path/to/model \
+  --ref_dataset_path /path/to/ref.parquet \
+  --kd_dataset_path /path/to/kd.parquet \
+  --output_dir /path/to/score_dir \
+  --eta 1e-5 \
+  --candidate_modules q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
+  --layer_group_size 1 \
+  --factor_storage_device cpu \
+  --loss_on full_trajectory
+```
+
+Each candidate weight gets one safetensor shard containing `score`, `damage`,
+and `recovery`. `manifest.json` records exact parameter names, dimensions,
+factor memory, loss and gradient conventions, fixed-point diagnostics, and
+per-module statistics. Add `--save_factor_diagnostics` to save `h_ref`, `rho`,
+and the factor-derived diagonal vectors in each shard.
+
+For distributed layer sharding, launch one complete model replica per rank with
+`torchrun` and add `--distributed_layer_sharding`. Layer groups are assigned to
+ranks without factor synchronization; rank zero merges only the small rank
+manifests after all score shards have been written.
+
+The cluster launcher is:
+
+```text
+exp_track/08_21_2026/layer_dap_nll_sft/qwen3_8b_generate_layer_factorized_recoverability_scores.sh
+```
+
+It performs a one-layer smoke test before starting the distributed full job.
+
+## Full-HVP implementation
+
 `generate_recoverability_scores.py` estimates the dense reference curvature and
 reference/KD recovery covariance with shared Rademacher probes. It never modifies
 or prunes the checkpoint.
