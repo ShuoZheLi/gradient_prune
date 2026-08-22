@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attention_implementation", choices=["eager", "sdpa"], default="eager")
     parser.add_argument("--diagnostic_batches", type=int, default=1)
     parser.add_argument("--save_factor_diagnostics", action="store_true")
+    parser.add_argument("--score_shard_format", choices=["safetensors", "pt"], default="safetensors")
     parser.add_argument("--distributed_layer_sharding", action="store_true")
     parser.add_argument("--layer_shard_strategy", choices=["round_robin", "contiguous"], default="round_robin")
     parser.add_argument("--overwrite", action="store_true")
@@ -198,6 +199,35 @@ def merge_manifests(output_dir: Path, metadata: dict[str, object], world_size: i
         group_diagnostics.extend(payload["group_diagnostics"])
     manifest = {**metadata, "modules": dict(sorted(modules.items())), "group_diagnostics": group_diagnostics}
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    if metadata["score_shard_format"] == "pt":
+        compatibility_modules = {
+            parameter_name.removesuffix(".weight"): entry["shard"]
+            for parameter_name, entry in sorted(modules.items())
+        }
+        compatibility_metadata = {
+            "method": metadata["method"],
+            "model_name": metadata["model_path"],
+            "model_path": metadata["model_path"],
+            "calibration_path": metadata["kd_dataset"],
+            "ref_dataset": metadata["ref_dataset"],
+            "kd_dataset": metadata["kd_dataset"],
+            "score_key": "score",
+            "definition": "layerwise_factorized_recoverability: damage - recovery",
+            "selection_rule": "higher scores are kept; lower scores are pruned",
+            "modules": compatibility_modules,
+            "num_modules": len(compatibility_modules),
+            "num_total_scores": int(
+                sum(
+                    int(entry["shape"][0]) * int(entry["shape"][1])
+                    for entry in modules.values()
+                )
+            ),
+            "source_manifest": "manifest.json",
+        }
+        (output_dir / "metadata.json").write_text(
+            json.dumps(compatibility_metadata, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
 
 def main() -> int:
@@ -349,6 +379,7 @@ def main() -> int:
                 parameter_name,
                 tensors,
                 save_factor_diagnostics=args.save_factor_diagnostics,
+                shard_format=args.score_shard_format,
             )
             diagnostics = module_diagnostics(tensors, ref_factors[name], kd_factors[name])
             factor_memory = {
@@ -405,6 +436,7 @@ def main() -> int:
         "dtype_model": args.dtype,
         "dtype_factor_accumulation": "float32",
         "factor_storage_device": args.factor_storage_device,
+        "score_shard_format": args.score_shard_format,
         "activation_offload": args.activation_offload,
         "activation_offload_pin_memory": args.activation_offload_pin_memory,
         "loss_masking": args.loss_on,

@@ -36,11 +36,17 @@ with the scoring checkpoint tokenizer and requires those IDs to be an exact
 prefix of every stored trajectory. Any mismatch is a hard error rather than a
 silently inferred boundary.
 
-Each candidate weight gets one safetensor shard containing `score`, `damage`,
-and `recovery`. `manifest.json` records exact parameter names, dimensions,
+Each candidate weight gets one shard containing `score`, `damage`, and
+`recovery`. `manifest.json` records exact parameter names, dimensions,
 factor memory, loss and gradient conventions, fixed-point diagnostics, and
 per-module statistics. Add `--save_factor_diagnostics` to save `h_ref`, `rho`,
 and the factor-derived diagonal vectors in each shard.
+
+Use `--score_shard_format pt` to write one PyTorch shard per module and a
+WANDA-compatible `metadata.json`. The existing VERL sparse-update mask builder
+then reads the Layer-DAP `score` key without modifying the training scripts. The
+cluster launcher uses this compatibility format by default; it does not write a
+second duplicate copy of the score tensors.
 
 For distributed layer sharding, launch one complete model replica per rank with
 `torchrun` and add `--distributed_layer_sharding`. Layer groups are assigned to

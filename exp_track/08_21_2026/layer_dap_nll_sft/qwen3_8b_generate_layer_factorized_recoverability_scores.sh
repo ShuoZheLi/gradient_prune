@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=qwen3_8b_layer_dap
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh-dev
-#SBATCH --nodes=4
+#SBATCH --partition=gh
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=2:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=slurm-%j_qwen3_8b_layer_dap.out
 #SBATCH --error=slurm-%j_qwen3_8b_layer_dap.err
 
@@ -96,6 +96,7 @@ ACTIVATION_OFFLOAD_PIN_MEMORY="${ACTIVATION_OFFLOAD_PIN_MEMORY:-0}"
 ATTENTION_IMPLEMENTATION="${ATTENTION_IMPLEMENTATION:-sdpa}"
 DIAGNOSTIC_BATCHES="${DIAGNOSTIC_BATCHES:-1}"
 SAVE_FACTOR_DIAGNOSTICS="${SAVE_FACTOR_DIAGNOSTICS:-0}"
+SCORE_SHARD_FORMAT="${SCORE_SHARD_FORMAT:-pt}"
 SHUFFLE_DATASETS="${SHUFFLE_DATASETS:-1}"
 SEED="${SEED:-42}"
 RUN_SMOKE_FIRST="${RUN_SMOKE_FIRST:-0}"
@@ -146,6 +147,7 @@ COMMON_ARGS=(
   --prompt_text_column "$PROMPT_TEXT_COLUMN"
   --attention_implementation "$ATTENTION_IMPLEMENTATION"
   --diagnostic_batches "$DIAGNOSTIC_BATCHES"
+  --score_shard_format "$SCORE_SHARD_FORMAT"
   --seed "$SEED"
 )
 if [[ "$MAX_REF_SAMPLES" != "all" ]]; then
@@ -208,6 +210,7 @@ if [[ "$RUN_SMOKE_FIRST" == "1" ]]; then
     --device cuda:0 \
     --attention_implementation "$ATTENTION_IMPLEMENTATION" \
     --diagnostic_batches 1 \
+    --score_shard_format "$SCORE_SHARD_FORMAT" \
     --seed "$SEED" \
     --save_factor_diagnostics \
     "${SMOKE_BOUNDARY_ARGS[@]}"

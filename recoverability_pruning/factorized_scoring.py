@@ -110,12 +110,21 @@ def save_score_shard(
     tensors: dict[str, torch.Tensor],
     *,
     save_factor_diagnostics: bool,
+    shard_format: str = "safetensors",
 ) -> Path:
     module_name = parameter_name.removesuffix(".weight")
-    shard_path = output_dir / f"{module_name}.safetensors"
-    shard_path.parent.mkdir(parents=True, exist_ok=True)
     keys = ["score", "damage", "recovery"]
     if save_factor_diagnostics:
         keys.extend(["h_ref", "rho", "diag_A_ref", "diag_A_kd", "diag_G_ref", "diag_G_kd", "cross_A", "cross_G"])
-    save_file({key: tensors[key].cpu().contiguous() for key in keys}, str(shard_path))
+    payload = {key: tensors[key].cpu().contiguous() for key in keys}
+    if shard_format == "safetensors":
+        shard_path = output_dir / f"{module_name}.safetensors"
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        save_file(payload, str(shard_path))
+    elif shard_format == "pt":
+        shard_path = output_dir / f"{module_name.replace('.', '__')}.pt"
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, shard_path)
+    else:
+        raise ValueError(f"Unsupported score shard format: {shard_format!r}")
     return shard_path
