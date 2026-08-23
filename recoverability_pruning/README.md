@@ -5,13 +5,18 @@
 `generate_layer_factorized_recoverability_scores.py` is the correctness-first
 layer-local implementation. It uses ordinary forward/backward hooks to collect
 activation and output-gradient second moments, never requests higher-order
-autograd, and never constructs a Kronecker Hessian.
+autograd, and never constructs a Kronecker Hessian. The scalable default is
+`--g_structure diagonal`; `--g_structure full` retains the original Full-(G)
+curvature model for controlled ablations.
 
-The scalar NLL is token-mean normalized. Before accumulating `G`, hook gradients
-are multiplied by the number of supervised tokens in the current batch. This
-recovers gradients of the token-sum loss and prevents `G` from changing merely
-because the same examples are partitioned into different batch sizes. Both `A`
-and `G` are then divided by their number of non-padding sequence positions.
+The scalar NLL is token-mean normalized. Before accumulating output-gradient
+statistics, hook gradients are multiplied by the number of supervised tokens in
+the current batch. This recovers gradients of the token-sum loss and prevents
+the factors from changing merely because the same examples are partitioned into
+different batch sizes. `A` and the selected output factor are then divided by
+their number of non-padding sequence positions. Diagonal mode accumulates
+`gamma = sum(g ** 2, dim=token)` directly and never allocates `[d_out, d_out]`
+`G` matrices.
 
 ```bash
 python generate_layer_factorized_recoverability_scores.py \
@@ -22,6 +27,7 @@ python generate_layer_factorized_recoverability_scores.py \
   --eta 1e-5 \
   --candidate_modules q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   --layer_group_size 1 \
+  --g_structure diagonal \
   --factor_storage_device cpu \
   --activation_offload cpu \
   --loss_on response_only \
@@ -38,9 +44,11 @@ silently inferred boundary.
 
 Each candidate weight gets one shard containing `score`, `damage`, and
 `recovery`. `manifest.json` records exact parameter names, dimensions,
-factor memory, loss and gradient conventions, fixed-point diagnostics, and
-per-module statistics. Add `--save_factor_diagnostics` to save `h_ref`, `rho`,
-and the factor-derived diagonal vectors in each shard.
+factor memory, supervised-token counts, loss and gradient conventions,
+fixed-point diagnostics, and per-module statistics. Add
+`--save_factor_diagnostics` to save `h_ref`, `rho`, and lightweight
+factor-derived vectors in each shard. Diagonal mode saves `gamma_ref` and
+`gamma_kd`; it has no `cross_G` output.
 
 Use `--score_shard_format pt` to write one PyTorch shard per module and a
 WANDA-compatible `metadata.json`. The existing VERL sparse-update mask builder
@@ -58,13 +66,14 @@ ordinary backward pass to host memory. This does not alter hook values or use
 second-order autograd, but it trades runtime and host bandwidth for lower GPU
 activation memory.
 
-The cluster launcher is:
+The diagonal-(G) cluster launcher is:
 
 ```text
-exp_track/08_21_2026/layer_dap_nll_sft/qwen3_8b_generate_layer_factorized_recoverability_scores.sh
+exp_track/08_21_2026/layer_dia_g_dap_nll_sft/qwen3_8b_generate_layer_diagonal_g_recoverability_scores.sh
 ```
 
-It performs a one-layer smoke test before starting the distributed full job.
+Set `G_STRUCTURE=full` to run the Full-(G) ablation through the same code path.
+The launcher can perform a one-layer smoke test before the distributed full job.
 
 ## Full-HVP implementation
 

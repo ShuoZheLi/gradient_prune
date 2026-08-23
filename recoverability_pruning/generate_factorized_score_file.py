@@ -24,6 +24,7 @@ from .factorized_factors import (
     process_peak_cpu_memory_bytes,
 )
 from .factorized_scoring import factorized_score_tensors, module_diagnostics, save_score_shard
+from .losses import IGNORE_INDEX
 from .params import DEFAULT_CANDIDATE_MODULES, parse_module_patterns
 
 
@@ -47,7 +48,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate_modules", nargs="+", default=list(DEFAULT_CANDIDATE_MODULES))
     parser.add_argument("--module_names", nargs="*", help="Optional exact module-name subset")
     parser.add_argument("--layer_group_size", type=int, default=1)
-    parser.add_argument("--factor_structure", choices=["full", "block", "diagonal_g"], default="full")
+    parser.add_argument(
+        "--g_structure",
+        choices=["full", "diagonal"],
+        help="Output-gradient curvature structure (default: diagonal)",
+    )
+    parser.add_argument(
+        "--factor_structure",
+        choices=["full", "block", "diagonal_g"],
+        help="Deprecated compatibility alias for --g_structure",
+    )
     parser.add_argument("--factor_storage_device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--factor_chunk_size", type=int, default=2048)
     parser.add_argument("--activation_offload", choices=["none", "cpu"], default="none")
@@ -78,6 +88,23 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_dtype(name: str) -> torch.dtype:
     return {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[name]
+
+
+def resolve_g_structure(args: argparse.Namespace) -> str:
+    compatibility_value = {
+        None: None,
+        "full": "full",
+        "diagonal_g": "diagonal",
+    }.get(args.factor_structure)
+    if args.factor_structure == "block":
+        raise NotImplementedError("Block factor structure is not implemented")
+    if args.g_structure is not None and compatibility_value is not None:
+        if args.g_structure != compatibility_value:
+            raise ValueError(
+                f"Conflicting --g_structure={args.g_structure!r} and "
+                f"--factor_structure={args.factor_structure!r}"
+            )
+    return args.g_structure or compatibility_value or "diagonal"
 
 
 def initialize_distributed(args: argparse.Namespace) -> tuple[int, int]:
@@ -233,8 +260,7 @@ def merge_manifests(output_dir: Path, metadata: dict[str, object], world_size: i
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args()
-    if args.factor_structure != "full":
-        raise NotImplementedError("Only --factor_structure full is implemented in the correctness-first version")
+    args.g_structure = resolve_g_structure(args)
     rank, world_size = initialize_distributed(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -326,13 +352,20 @@ def main() -> int:
         names = list(group)
         LOGGER.info("rank=%d group=%d/%d modules=%s", rank, group_index + 1, len(local_groups), names)
         for name, module in group.items():
+            output_factor_elements = (
+                module.out_features * module.out_features
+                if args.g_structure == "full"
+                else module.out_features
+            )
+            output_factor_label = "G" if args.g_structure == "full" else "gamma"
             LOGGER.info(
-                "%s d_in=%d d_out=%d A=%.2f MiB G=%.2f MiB per dataset",
+                "%s d_in=%d d_out=%d A=%.2f MiB %s=%.4f MiB per dataset",
                 name,
                 module.in_features,
                 module.out_features,
                 module.in_features * module.in_features * 4 / 2**20,
-                module.out_features * module.out_features * 4 / 2**20,
+                output_factor_label,
+                output_factor_elements * 4 / 2**20,
             )
         ref_fixed_point = compute_group_gradient_diagnostic(
             model,
@@ -357,6 +390,7 @@ def main() -> int:
             storage_device=storage_device,
             chunk_size=args.factor_chunk_size,
             dataset_name="reference",
+            g_structure=args.g_structure,
             activation_offload=args.activation_offload,
             activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
@@ -367,6 +401,7 @@ def main() -> int:
             storage_device=storage_device,
             chunk_size=args.factor_chunk_size,
             dataset_name="kd",
+            g_structure=args.g_structure,
             activation_offload=args.activation_offload,
             activation_offload_pin_memory=args.activation_offload_pin_memory,
         )
@@ -384,8 +419,12 @@ def main() -> int:
             diagnostics = module_diagnostics(tensors, ref_factors[name], kd_factors[name])
             factor_memory = {
                 "A_bytes": int(ref_factors[name].activation.numel() * ref_factors[name].activation.element_size()),
-                "G_bytes": int(ref_factors[name].output_gradient.numel() * ref_factors[name].output_gradient.element_size()),
             }
+            output_factor_key = "G_bytes" if args.g_structure == "full" else "gamma_bytes"
+            factor_memory[output_factor_key] = int(
+                ref_factors[name].output_gradient.numel()
+                * ref_factors[name].output_gradient.element_size()
+            )
             rank_payload["modules"][parameter_name] = {
                 "shard": str(shard_path.relative_to(output_dir)),
                 "shape": list(module.weight.shape),
@@ -428,14 +467,20 @@ def main() -> int:
         "kd_dataset": args.kd_dataset_path,
         "eta": args.eta,
         "loss": "causal_sft_nll_token_mean",
+        "loss_normalization": "token_mean_nll_backward_with_loss_sum_gradient_rescaling",
         "output_gradient_convention": "loss_sum_gradient_rescaled_from_token_mean_backward",
-        "factorization": "G_kron_A",
-        "factor_structure": args.factor_structure,
+        "factor_token_normalization": "mean_over_valid_non_padding_sequence_positions",
+        "factorization": "G_kron_A" if args.g_structure == "full" else "diagG_kron_A",
+        "g_structure": args.g_structure,
+        "factor_structure": "full" if args.g_structure == "full" else "diagonal_g",
         "cross_layer_curvature": False,
+        "cross_output_curvature": args.g_structure == "full",
+        "within_output_row_recovery": True,
         "candidate_modules": list(patterns),
         "dtype_model": args.dtype,
         "dtype_factor_accumulation": "float32",
         "factor_storage_device": args.factor_storage_device,
+        "factor_chunk_size": args.factor_chunk_size,
         "score_shard_format": args.score_shard_format,
         "activation_offload": args.activation_offload,
         "activation_offload_pin_memory": args.activation_offload_pin_memory,
@@ -444,8 +489,21 @@ def main() -> int:
         "prompt_text_column": args.prompt_text_column if args.derive_prompt_length_from_prompt else None,
         "derive_prompt_length_from_prompt": args.derive_prompt_length_from_prompt,
         "max_length": args.max_length,
+        "truncation_side": args.truncation_side,
+        "max_ref_samples": args.max_ref_samples,
+        "max_kd_samples": args.max_kd_samples,
+        "shuffle_ref": args.shuffle_ref,
+        "shuffle_kd": args.shuffle_kd,
         "num_ref_examples": len(reference_dataset),
         "num_kd_examples": len(kd_dataset),
+        "num_ref_tokens": sum(
+            sum(token != IGNORE_INDEX for token in example.labels[1:])
+            for example in reference_dataset.examples
+        ),
+        "num_kd_tokens": sum(
+            sum(token != IGNORE_INDEX for token in example.labels[1:])
+            for example in kd_dataset.examples
+        ),
         "ref_batch_size": args.ref_batch_size or args.batch_size,
         "kd_batch_size": args.kd_batch_size or args.batch_size,
         "layer_group_size": args.layer_group_size,
@@ -453,6 +511,7 @@ def main() -> int:
         "distributed_world_size": world_size,
         "layer_shard_strategy": args.layer_shard_strategy,
         "attention_implementation": args.attention_implementation,
+        "diagnostic_batches": args.diagnostic_batches,
         "gradient_checkpointing": False,
         "seed": args.seed,
     }

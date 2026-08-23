@@ -17,6 +17,10 @@ def factorized_score_tensors(
     *,
     eta: float,
 ) -> dict[str, torch.Tensor]:
+    if ref.g_structure != kd.g_structure:
+        raise ValueError(
+            f"Reference/KD g_structure mismatch: {ref.g_structure!r} != {kd.g_structure!r}"
+        )
     activation_ref = ref.activation.float()
     activation_kd = kd.activation.float()
     gradient_ref = ref.output_gradient.float()
@@ -24,17 +28,34 @@ def factorized_score_tensors(
 
     diag_activation_ref = torch.diagonal(activation_ref)
     diag_activation_kd = torch.diagonal(activation_kd)
-    diag_gradient_ref = torch.diagonal(gradient_ref)
-    diag_gradient_kd = torch.diagonal(gradient_kd)
-
     cross_activation = (activation_ref * activation_kd.transpose(0, 1)).sum(dim=1)
-    cross_gradient = (gradient_ref * gradient_kd.transpose(0, 1)).sum(dim=1)
-    h_ref = diag_gradient_ref[:, None] * diag_activation_ref[None, :]
-    rho = (
-        cross_gradient[:, None] * cross_activation[None, :]
-        - (diag_gradient_ref * diag_gradient_kd)[:, None]
-        * (diag_activation_ref * diag_activation_kd)[None, :]
-    )
+    input_recoverability = cross_activation - diag_activation_ref * diag_activation_kd
+
+    if ref.g_structure == "full":
+        if gradient_ref.ndim != 2 or gradient_kd.ndim != 2:
+            raise ValueError("Full-G factors must be matrices")
+        diag_gradient_ref = torch.diagonal(gradient_ref)
+        diag_gradient_kd = torch.diagonal(gradient_kd)
+        cross_gradient = (gradient_ref * gradient_kd.transpose(0, 1)).sum(dim=1)
+        h_ref = diag_gradient_ref[:, None] * diag_activation_ref[None, :]
+        rho = (
+            cross_gradient[:, None] * cross_activation[None, :]
+            - (diag_gradient_ref * diag_gradient_kd)[:, None]
+            * (diag_activation_ref * diag_activation_kd)[None, :]
+        )
+    elif ref.g_structure == "diagonal":
+        if gradient_ref.ndim != 1 or gradient_kd.ndim != 1:
+            raise ValueError("Diagonal-G factors must be vectors")
+        diag_gradient_ref = gradient_ref
+        diag_gradient_kd = gradient_kd
+        h_ref = diag_gradient_ref[:, None] * diag_activation_ref[None, :]
+        rho = (
+            (diag_gradient_ref * diag_gradient_kd)[:, None]
+            * input_recoverability[None, :]
+        )
+        cross_gradient = None
+    else:
+        raise ValueError(f"Unsupported g_structure={ref.g_structure!r}")
 
     weight_square = weight.detach().float().cpu().square()
     h_ref = h_ref.cpu()
@@ -50,7 +71,7 @@ def factorized_score_tensors(
     for name, tensor in {"score": score, "damage": damage, "recovery": recovery}.items():
         if not torch.isfinite(tensor).all():
             raise FloatingPointError(f"Non-finite values in {name}")
-    return {
+    tensors = {
         "score": score.contiguous(),
         "damage": damage.contiguous(),
         "recovery": recovery.contiguous(),
@@ -58,11 +79,17 @@ def factorized_score_tensors(
         "rho": rho.contiguous(),
         "diag_A_ref": diag_activation_ref.cpu().contiguous(),
         "diag_A_kd": diag_activation_kd.cpu().contiguous(),
-        "diag_G_ref": diag_gradient_ref.cpu().contiguous(),
-        "diag_G_kd": diag_gradient_kd.cpu().contiguous(),
         "cross_A": cross_activation.cpu().contiguous(),
-        "cross_G": cross_gradient.cpu().contiguous(),
+        "input_recoverability": input_recoverability.cpu().contiguous(),
     }
+    if ref.g_structure == "diagonal":
+        tensors["gamma_ref"] = diag_gradient_ref.cpu().contiguous()
+        tensors["gamma_kd"] = diag_gradient_kd.cpu().contiguous()
+    else:
+        tensors["diag_G_ref"] = diag_gradient_ref.cpu().contiguous()
+        tensors["diag_G_kd"] = diag_gradient_kd.cpu().contiguous()
+        tensors["cross_G"] = cross_gradient.cpu().contiguous()
+    return tensors
 
 
 def _cosine(left: torch.Tensor, right: torch.Tensor) -> float:
@@ -79,13 +106,12 @@ def module_diagnostics(
     kd: FactorPair,
 ) -> dict[str, object]:
     recovery = tensors["recovery"]
-    return {
+    diagnostics = {
+        "g_structure": ref.g_structure,
         "diag_A_ref": tensor_summary(tensors["diag_A_ref"]),
         "diag_A_kd": tensor_summary(tensors["diag_A_kd"]),
-        "diag_G_ref": tensor_summary(tensors["diag_G_ref"]),
-        "diag_G_kd": tensor_summary(tensors["diag_G_kd"]),
         "cross_A": tensor_summary(tensors["cross_A"]),
-        "cross_G": tensor_summary(tensors["cross_G"]),
+        "input_recoverability": tensor_summary(tensors["input_recoverability"]),
         "damage": tensor_summary(tensors["damage"]),
         "recovery": tensor_summary(recovery),
         "score": tensor_summary(tensors["score"]),
@@ -102,6 +128,14 @@ def module_diagnostics(
         "output_gradient_count_ref": ref.output_gradient_count,
         "output_gradient_count_kd": kd.output_gradient_count,
     }
+    if ref.g_structure == "full":
+        diagnostics["diag_G_ref"] = tensor_summary(tensors["diag_G_ref"])
+        diagnostics["diag_G_kd"] = tensor_summary(tensors["diag_G_kd"])
+        diagnostics["cross_G"] = tensor_summary(tensors["cross_G"])
+    else:
+        diagnostics["gamma_ref"] = tensor_summary(tensors["gamma_ref"])
+        diagnostics["gamma_kd"] = tensor_summary(tensors["gamma_kd"])
+    return diagnostics
 
 
 def save_score_shard(
@@ -115,7 +149,11 @@ def save_score_shard(
     module_name = parameter_name.removesuffix(".weight")
     keys = ["score", "damage", "recovery"]
     if save_factor_diagnostics:
-        keys.extend(["h_ref", "rho", "diag_A_ref", "diag_A_kd", "diag_G_ref", "diag_G_kd", "cross_A", "cross_G"])
+        keys.extend(["h_ref", "rho", "diag_A_ref", "diag_A_kd", "cross_A", "input_recoverability"])
+        if "gamma_ref" in tensors:
+            keys.extend(["gamma_ref", "gamma_kd"])
+        else:
+            keys.extend(["diag_G_ref", "diag_G_kd", "cross_G"])
     payload = {key: tensors[key].cpu().contiguous() for key in keys}
     if shard_format == "safetensors":
         shard_path = output_dir / f"{module_name}.safetensors"

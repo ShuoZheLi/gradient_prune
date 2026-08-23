@@ -49,6 +49,7 @@ class FactorPair:
     output_gradient: torch.Tensor
     activation_count: int
     output_gradient_count: int
+    g_structure: str = "full"
 
 
 @dataclass
@@ -68,12 +69,16 @@ class FactorCollector:
         *,
         storage_device: torch.device,
         chunk_size: int,
+        g_structure: str = "full",
     ) -> None:
         if chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if g_structure not in {"full", "diagonal"}:
+            raise ValueError(f"Unsupported g_structure={g_structure!r}")
         self.modules = dict(modules)
         self.storage_device = storage_device
         self.chunk_size = chunk_size
+        self.g_structure = g_structure
         self._sums = {name: _FactorSums() for name in self.modules}
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
         self._attention_mask: torch.Tensor | None = None
@@ -154,28 +159,32 @@ class FactorCollector:
             )
         flat_values = values.reshape(-1, feature_size)
         valid = attention_mask.to(device=values.device).reshape(-1)
-        selected = flat_values[valid]
-        if selected.numel() == 0:
+        selected_count = int(valid.sum().item())
+        if selected_count == 0:
             return
 
         sums = self._sums[name]
-        matrix = getattr(sums, factor_name)
-        if matrix is None:
-            matrix = torch.zeros(
-                (feature_size, feature_size),
-                dtype=torch.float32,
-                device=self.storage_device,
-            )
-            setattr(sums, factor_name, matrix)
+        factor = getattr(sums, factor_name)
+        is_diagonal_gradient = factor_name == "output_gradient" and self.g_structure == "diagonal"
+        if factor is None:
+            shape = (feature_size,) if is_diagonal_gradient else (feature_size, feature_size)
+            factor = torch.zeros(shape, dtype=torch.float32, device=self.storage_device)
+            setattr(sums, factor_name, factor)
 
-        for start in range(0, selected.shape[0], self.chunk_size):
-            chunk = selected[start : start + self.chunk_size].float()
+        for start in range(0, flat_values.shape[0], self.chunk_size):
+            end = start + self.chunk_size
+            chunk = flat_values[start:end][valid[start:end]].float()
+            if chunk.numel() == 0:
+                continue
             if scale != 1.0:
                 chunk = chunk * scale
-            second_moment = chunk.transpose(0, 1).matmul(chunk)
-            matrix.add_(second_moment.to(self.storage_device, non_blocking=False))
+            if is_diagonal_gradient:
+                second_moment = chunk.square().sum(dim=0)
+            else:
+                second_moment = chunk.transpose(0, 1).matmul(chunk)
+            factor.add_(second_moment.to(self.storage_device, non_blocking=False))
         count_name = f"{factor_name}_count"
-        setattr(sums, count_name, getattr(sums, count_name) + selected.shape[0])
+        setattr(sums, count_name, getattr(sums, count_name) + selected_count)
 
     def finalize(self) -> dict[str, FactorPair]:
         factors = {}
@@ -189,6 +198,7 @@ class FactorCollector:
                 output_gradient=sums.output_gradient.div(float(sums.output_gradient_count)),
                 activation_count=sums.activation_count,
                 output_gradient_count=sums.output_gradient_count,
+                g_structure=self.g_structure,
             )
         return factors
 
@@ -212,6 +222,7 @@ def collect_dataset_factors(
     storage_device: torch.device,
     chunk_size: int,
     dataset_name: str,
+    g_structure: str = "full",
     activation_offload: str = "none",
     activation_offload_pin_memory: bool = False,
 ) -> tuple[dict[str, FactorPair], dict[str, float | int]]:
@@ -223,7 +234,12 @@ def collect_dataset_factors(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
-    with FactorCollector(modules, storage_device=storage_device, chunk_size=chunk_size) as collector:
+    with FactorCollector(
+        modules,
+        storage_device=storage_device,
+        chunk_size=chunk_size,
+        g_structure=g_structure,
+    ) as collector:
         for batch_index, batch in enumerate(dataloader):
             model.zero_grad(set_to_none=True)
             moved_batch = move_batch(batch, model_input_device(model))
@@ -265,6 +281,7 @@ def collect_dataset_factors(
         "peak_cpu_memory_bytes": process_peak_cpu_memory_bytes(),
         "activation_offload": activation_offload,
         "activation_offload_pin_memory": activation_offload_pin_memory,
+        "g_structure": g_structure,
     }
     if torch.cuda.is_available():
         diagnostics["peak_gpu_memory_bytes"] = int(torch.cuda.max_memory_allocated())
