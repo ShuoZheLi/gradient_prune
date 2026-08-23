@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=qwen3_8b_layer_dia_g_dap
 #SBATCH --account=ASC26008
-#SBATCH --partition=gh
+#SBATCH --partition=gh-dev
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=14:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=slurm-%j_qwen3_8b_layer_dia_g_dap.out
 #SBATCH --error=slurm-%j_qwen3_8b_layer_dia_g_dap.err
 
