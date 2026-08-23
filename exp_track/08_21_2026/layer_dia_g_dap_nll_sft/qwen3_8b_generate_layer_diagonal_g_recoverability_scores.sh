@@ -58,7 +58,8 @@ unset MASTER_ADDR MASTER_PORT WORLD_SIZE RANK LOCAL_RANK GROUP_RANK ROLE_RANK RO
 
 MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
 REF_DATASET_PATH="${REF_DATASET_PATH:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}"
-KD_DATASET_PATH="${KD_DATASET_PATH:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
+# KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
+KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct/qwen3-8b-instruct_math7500_correct.parquet}"
 
 RUN_NAME="${RUN_NAME:-qwen3_8b_layer_dia_g_dap_nll_sft}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
