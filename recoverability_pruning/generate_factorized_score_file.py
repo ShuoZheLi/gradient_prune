@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import gc
 import json
 import logging
@@ -82,6 +83,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score_shard_format", choices=["safetensors", "pt"], default="safetensors")
     parser.add_argument("--distributed_layer_sharding", action="store_true")
     parser.add_argument("--layer_shard_strategy", choices=["round_robin", "contiguous"], default="round_robin")
+    parser.add_argument("--distributed_timeout_minutes", type=int, default=1440)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -114,7 +117,15 @@ def initialize_distributed(args: argparse.Namespace) -> tuple[int, int]:
         return rank, world_size
     if not args.distributed_layer_sharding:
         raise ValueError(f"WORLD_SIZE={world_size} requires --distributed_layer_sharding")
-    dist.init_process_group(backend="gloo")
+    if args.distributed_timeout_minutes <= 0:
+        raise ValueError(
+            "distributed_timeout_minutes must be positive, got "
+            f"{args.distributed_timeout_minutes}"
+        )
+    dist.init_process_group(
+        backend="gloo",
+        timeout=datetime.timedelta(minutes=args.distributed_timeout_minutes),
+    )
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -214,6 +225,67 @@ def write_rank_manifest(output_dir: Path, rank: int, payload: dict[str, object])
     temporary.replace(path)
 
 
+def load_resume_rank_manifest(
+    output_dir: Path,
+    rank: int,
+    local_groups: list[OrderedDict[str, nn.Linear]],
+) -> tuple[dict[str, object], set[int]]:
+    path = output_dir / f"manifest.rank{rank:05d}.json"
+    if not path.exists():
+        return {"rank": rank, "modules": {}, "group_diagnostics": []}, set()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("rank") != rank:
+        raise ValueError(f"Rank manifest {path} records rank={payload.get('rank')}, expected {rank}")
+    modules = payload.get("modules")
+    group_diagnostics = payload.get("group_diagnostics")
+    if not isinstance(modules, dict) or not isinstance(group_diagnostics, list):
+        raise ValueError(f"Invalid rank manifest structure: {path}")
+
+    local_parameter_names = {
+        f"{name}.weight"
+        for group in local_groups
+        for name in group
+    }
+    unexpected = sorted(set(modules) - local_parameter_names)
+    if unexpected:
+        raise ValueError(
+            f"Rank manifest {path} contains modules not assigned to rank {rank} in this run: "
+            f"{unexpected}. Resume with the original world size, sharding strategy, layer group size, "
+            "and module selection."
+        )
+
+    completed_groups = set()
+    for group_index, group in enumerate(local_groups):
+        names = list(group)
+        parameter_names = [f"{name}.weight" for name in names]
+        complete = True
+        for parameter_name in parameter_names:
+            entry = modules.get(parameter_name)
+            shard = entry.get("shard") if isinstance(entry, dict) else None
+            if not isinstance(shard, str) or not (output_dir / shard).is_file():
+                complete = False
+                break
+        if complete:
+            completed_groups.add(group_index)
+            continue
+
+        for parameter_name in parameter_names:
+            modules.pop(parameter_name, None)
+        group_name_set = set(names)
+        payload["group_diagnostics"] = [
+            diagnostic
+            for diagnostic in payload["group_diagnostics"]
+            if not (
+                isinstance(diagnostic, dict)
+                and isinstance(diagnostic.get("modules"), list)
+                and group_name_set.intersection(diagnostic["modules"])
+            )
+        ]
+
+    return payload, completed_groups
+
+
 def merge_manifests(output_dir: Path, metadata: dict[str, object], world_size: int) -> None:
     modules = {}
     group_diagnostics = []
@@ -261,6 +333,8 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args()
     args.g_structure = resolve_g_structure(args)
+    if args.resume and args.overwrite:
+        raise ValueError("--resume and --overwrite are mutually exclusive")
     rank, world_size = initialize_distributed(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -271,11 +345,13 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     if rank == 0:
         if output_dir.exists() and any(output_dir.iterdir()):
-            if not args.overwrite:
+            if args.overwrite:
+                shutil.rmtree(output_dir)
+            elif not args.resume:
                 raise FileExistsError(
-                    f"Output directory is not empty: {output_dir}; pass --overwrite to replace it"
+                    f"Output directory is not empty: {output_dir}; pass --resume to reuse completed "
+                    "groups or --overwrite to replace it"
                 )
-            shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
     if world_size > 1:
         dist.barrier()
@@ -346,10 +422,34 @@ def main() -> int:
         pad_token_id=tokenizer.pad_token_id,
     )
     storage_device = torch.device(args.device if args.factor_storage_device == "cuda" else "cpu")
-    rank_payload: dict[str, object] = {"rank": rank, "modules": {}, "group_diagnostics": []}
+    if args.resume:
+        rank_payload, completed_groups = load_resume_rank_manifest(
+            output_dir,
+            rank,
+            local_groups,
+        )
+        write_rank_manifest(output_dir, rank, rank_payload)
+        LOGGER.info(
+            "rank=%d resume found %d/%d completed groups",
+            rank,
+            len(completed_groups),
+            len(local_groups),
+        )
+    else:
+        rank_payload = {"rank": rank, "modules": {}, "group_diagnostics": []}
+        completed_groups = set()
 
     for group_index, group in enumerate(local_groups):
         names = list(group)
+        if group_index in completed_groups:
+            LOGGER.info(
+                "rank=%d group=%d/%d already complete; skipping modules=%s",
+                rank,
+                group_index + 1,
+                len(local_groups),
+                names,
+            )
+            continue
         LOGGER.info("rank=%d group=%d/%d modules=%s", rank, group_index + 1, len(local_groups), names)
         for name, module in group.items():
             output_factor_elements = (

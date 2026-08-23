@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=qwen3_8b_layer_dia_g_dap
+#SBATCH --job-name=qwen3_8b_layer_dia_g_resume
 #SBATCH --account=ASC26008
 #SBATCH --partition=gh
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=72
-#SBATCH --time=14:00:00
-#SBATCH --output=slurm-%j_qwen3_8b_layer_dia_g_dap.out
-#SBATCH --error=slurm-%j_qwen3_8b_layer_dia_g_dap.err
+#SBATCH --time=8:00:00
+#SBATCH --output=slurm-%j_qwen3_8b_layer_dia_g_resume.out
+#SBATCH --error=slurm-%j_qwen3_8b_layer_dia_g_resume.err
 
 set -euo pipefail
 
@@ -44,6 +44,23 @@ REPO_ROOT="$(find_repo_root)" || {
 cd "$REPO_ROOT"
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH:-/scratch/09576/shuozhe}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH_ROOT/gradient_prune/results/layer_dia_g_dap_nll_sft/qwen3_8b_layer_dia_g_dap_nll_sft_930296_20260822_231956}"
+SCORE_DIR="${SCORE_DIR:-$OUTPUT_ROOT/scores}"
+LOG_DIR="$OUTPUT_ROOT/logs"
+
+if [[ ! -d "$SCORE_DIR" ]]; then
+  echo "Resume score directory does not exist: $SCORE_DIR" >&2
+  exit 3
+fi
+if ! compgen -G "$SCORE_DIR/manifest.rank*.json" >/dev/null; then
+  echo "No rank manifests found in resume score directory: $SCORE_DIR" >&2
+  exit 3
+fi
+
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_DIR/resume_${SLURM_JOB_ID:-manual}.log") \
+  2> >(tee -a "$LOG_DIR/resume_${SLURM_JOB_ID:-manual}.err" >&2)
+
 export HF_HOME="${HF_HOME:-$SCRATCH_ROOT/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
@@ -58,23 +75,12 @@ unset MASTER_ADDR MASTER_PORT WORLD_SIZE RANK LOCAL_RANK GROUP_RANK ROLE_RANK RO
 
 MODEL_PATH="${MODEL_PATH:-/work2/09576/shuozhe/saved_model/Qwen3-8B}"
 REF_DATASET_PATH="${REF_DATASET_PATH:-/work2/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math500_correct/qwen3-8b-instruct_math500_correct.parquet}"
-# KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct_5_response/qwen3-8b-instruct_math7500_correct_5_response.parquet}"
 KD_DATASET_PATH="${KD_DATASET_PATH:-/work/09576/shuozhe/gradient_prune/saved_calibration_dataset/qwen3-8b-instruct_math7500_correct/qwen3-8b-instruct_math7500_correct.parquet}"
-
-RUN_NAME="${RUN_NAME:-qwen3_8b_layer_dia_g_dap_nll_sft}"
-RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
-RUN_ID="${RUN_ID:-${RUN_NAME}_${SLURM_JOB_ID:-manual}_${RUN_TIMESTAMP}}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH_ROOT/gradient_prune/results/layer_dia_g_dap_nll_sft/$RUN_ID}"
-SCORE_DIR="${SCORE_DIR:-$OUTPUT_ROOT/scores}"
-SMOKE_DIR="${SMOKE_DIR:-$OUTPUT_ROOT/smoke}"
-LOG_DIR="$OUTPUT_ROOT/logs"
-mkdir -p "$LOG_DIR"
-exec > >(tee -a "$LOG_DIR/run.log") 2> >(tee -a "$LOG_DIR/run.err" >&2)
 
 for required_path in "$MODEL_PATH" "$REF_DATASET_PATH" "$KD_DATASET_PATH"; do
   if [[ ! -e "$required_path" ]]; then
     echo "Required path does not exist: $required_path" >&2
-    exit 3
+    exit 4
   fi
 done
 
@@ -101,19 +107,21 @@ SAVE_FACTOR_DIAGNOSTICS="${SAVE_FACTOR_DIAGNOSTICS:-0}"
 SCORE_SHARD_FORMAT="${SCORE_SHARD_FORMAT:-pt}"
 SHUFFLE_DATASETS="${SHUFFLE_DATASETS:-1}"
 SEED="${SEED:-42}"
-RUN_SMOKE_FIRST="${RUN_SMOKE_FIRST:-0}"
-RESUME="${RESUME:-0}"
 DISTRIBUTED_TIMEOUT_MINUTES="${DISTRIBUTED_TIMEOUT_MINUTES:-1440}"
-SMOKE_MAX_LENGTH="${SMOKE_MAX_LENGTH:-2048}"
-SMOKE_MODULE_NAME="${SMOKE_MODULE_NAME:-model.layers.0.self_attn.q_proj}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
 NNODES="${SLURM_JOB_NUM_NODES:-1}"
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 RDZV_PORT="${RDZV_PORT:-29500}"
+RUN_ID="qwen3_8b_layer_dia_g_resume_${SLURM_JOB_ID:-manual}"
+
 if (( GPUS_PER_NODE != 1 )); then
   echo "This launcher expects one process/GPU per node; got GPUS_PER_NODE=$GPUS_PER_NODE." >&2
-  exit 4
+  exit 5
+fi
+if (( WORLD_SIZE != 8 )); then
+  echo "Resume requires the original world size of 8; got WORLD_SIZE=$WORLD_SIZE." >&2
+  exit 5
 fi
 
 mapfile -t nodes_array < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
@@ -131,10 +139,11 @@ if [[ -z "$MASTER_ADDR" ]]; then
 fi
 RDZV_ENDPOINT="$MASTER_ADDR:$RDZV_PORT"
 
-COMMON_ARGS=(
+ARGS=(
   --model_path "$MODEL_PATH"
   --ref_dataset_path "$REF_DATASET_PATH"
   --kd_dataset_path "$KD_DATASET_PATH"
+  --output_dir "$SCORE_DIR"
   --eta "$ETA"
   --max_length "$MAX_LENGTH"
   --ref_batch_size "$REF_BATCH_SIZE"
@@ -154,81 +163,31 @@ COMMON_ARGS=(
   --score_shard_format "$SCORE_SHARD_FORMAT"
   --distributed_timeout_minutes "$DISTRIBUTED_TIMEOUT_MINUTES"
   --seed "$SEED"
+  --distributed_layer_sharding
+  --resume
 )
 if [[ "$MAX_REF_SAMPLES" != "all" ]]; then
-  COMMON_ARGS+=(--max_ref_samples "$MAX_REF_SAMPLES")
+  ARGS+=(--max_ref_samples "$MAX_REF_SAMPLES")
 fi
 if [[ "$MAX_KD_SAMPLES" != "all" ]]; then
-  COMMON_ARGS+=(--max_kd_samples "$MAX_KD_SAMPLES")
+  ARGS+=(--max_kd_samples "$MAX_KD_SAMPLES")
 fi
 if [[ "$SHUFFLE_DATASETS" == "1" ]]; then
-  COMMON_ARGS+=(--shuffle_ref --shuffle_kd)
+  ARGS+=(--shuffle_ref --shuffle_kd)
 fi
 if [[ "$SAVE_FACTOR_DIAGNOSTICS" == "1" ]]; then
-  COMMON_ARGS+=(--save_factor_diagnostics)
+  ARGS+=(--save_factor_diagnostics)
 fi
 if [[ "$ACTIVATION_OFFLOAD_PIN_MEMORY" == "1" ]]; then
-  COMMON_ARGS+=(--activation_offload_pin_memory)
+  ARGS+=(--activation_offload_pin_memory)
 fi
 if [[ "$DERIVE_PROMPT_LENGTH_FROM_PROMPT" == "1" ]]; then
-  COMMON_ARGS+=(--derive_prompt_length_from_prompt)
+  ARGS+=(--derive_prompt_length_from_prompt)
 fi
 
-echo "[layer_dia_g_dap] nodes=$NNODES world_size=$WORLD_SIZE layer_group_size=$LAYER_GROUP_SIZE"
-echo "[layer_dia_g_dap] score_dir=$SCORE_DIR"
-echo "[layer_dia_g_dap] LOSS_ON=$LOSS_ON derive_prompt_length_from_prompt=$DERIVE_PROMPT_LENGTH_FROM_PROMPT"
-
-if [[ "$RUN_SMOKE_FIRST" == "1" && "$RESUME" != "1" ]]; then
-  rm -rf "$SMOKE_DIR"
-  SMOKE_BOUNDARY_ARGS=()
-  if [[ "$DERIVE_PROMPT_LENGTH_FROM_PROMPT" == "1" ]]; then
-    SMOKE_BOUNDARY_ARGS+=(--derive_prompt_length_from_prompt)
-  fi
-  srun --nodes=1 --ntasks=1 --ntasks-per-node=1 -w "$head_node" \
-    bash -c '
-      set -euo pipefail
-      source "'"$VENV"'/bin/activate"
-      cd "'"$REPO_ROOT"'"
-      export PYTHONUNBUFFERED=1
-      export CUDA_VISIBLE_DEVICES=0
-      python generate_layer_factorized_recoverability_scores.py \
-        "$@"
-    ' _ \
-    --model_path "$MODEL_PATH" \
-    --ref_dataset_path "$REF_DATASET_PATH" \
-    --kd_dataset_path "$KD_DATASET_PATH" \
-    --output_dir "$SMOKE_DIR" \
-    --eta "$ETA" \
-    --loss_on "$LOSS_ON" \
-    --prompt_text_column "$PROMPT_TEXT_COLUMN" \
-    --max_ref_samples 1 \
-    --max_kd_samples 1 \
-    --max_length "$SMOKE_MAX_LENGTH" \
-    --batch_size 1 \
-    --module_names "$SMOKE_MODULE_NAME" \
-    --layer_group_size 1 \
-    --g_structure "$G_STRUCTURE" \
-    --factor_storage_device "$FACTOR_STORAGE_DEVICE" \
-    --factor_chunk_size "$FACTOR_CHUNK_SIZE" \
-    --activation_offload "$ACTIVATION_OFFLOAD" \
-    --dtype "$DTYPE" \
-    --device cuda:0 \
-    --attention_implementation "$ATTENTION_IMPLEMENTATION" \
-    --diagnostic_batches 1 \
-    --score_shard_format "$SCORE_SHARD_FORMAT" \
-    --seed "$SEED" \
-    --save_factor_diagnostics \
-    "${SMOKE_BOUNDARY_ARGS[@]}"
-  echo "[layer_dia_g_dap] one-layer smoke test passed: $SMOKE_DIR"
-fi
-
-FULL_ARGS=("${COMMON_ARGS[@]}" --output_dir "$SCORE_DIR" --distributed_layer_sharding)
-if [[ "$RESUME" == "1" ]]; then
-  FULL_ARGS+=(--resume)
-  echo "[layer_dia_g_dap] resuming completed groups from rank manifests"
-else
-  rm -rf "$SCORE_DIR"
-fi
+echo "[layer_dia_g_dap_resume] output_root=$OUTPUT_ROOT"
+echo "[layer_dia_g_dap_resume] score_dir=$SCORE_DIR"
+echo "[layer_dia_g_dap_resume] nodes=$NNODES world_size=$WORLD_SIZE timeout_minutes=$DISTRIBUTED_TIMEOUT_MINUTES"
 
 srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
   bash -c '
@@ -248,6 +207,6 @@ srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
       --rdzv_endpoint="'"$RDZV_ENDPOINT"'" \
       generate_layer_factorized_recoverability_scores.py \
       "$@"
-  ' _ "${FULL_ARGS[@]}"
+  ' _ "${ARGS[@]}"
 
-echo "[layer_dia_g_dap] completed successfully: $SCORE_DIR/manifest.json"
+echo "[layer_dia_g_dap_resume] completed successfully: $SCORE_DIR/manifest.json"
