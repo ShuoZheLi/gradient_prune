@@ -14,9 +14,23 @@ set -euo pipefail
 export SPARSITY_PERCENT="20"
 export PRUNING_SPARSITY="0.20"
 
-common_script="${EVAL_COMMON_SCRIPT:-$(dirname -- "${BASH_SOURCE[0]}")/eval_sparsity_common.sh}"
+common_script="${EVAL_COMMON_SCRIPT:-}"
+if [[ -z "$common_script" ]]; then
+  candidate_dirs=(
+    "${SLURM_SUBMIT_DIR:-}"
+    "${WORK_DIR:-}/exp_track/08_21_2026/layer_dia_g_dap_nll_sft/eval"
+    "/work2/09576/shuozhe/gradient_prune/exp_track/08_21_2026/layer_dia_g_dap_nll_sft/eval"
+    "$(dirname -- "${BASH_SOURCE[0]}")"
+  )
+  for candidate_dir in "${candidate_dirs[@]}"; do
+    if [[ -n "$candidate_dir" && -f "$candidate_dir/eval_sparsity_common.sh" ]]; then
+      common_script="$candidate_dir/eval_sparsity_common.sh"
+      break
+    fi
+  done
+fi
 if [[ ! -f "$common_script" ]]; then
-  echo "Could not locate eval_sparsity_common.sh: $common_script" >&2
+  echo "Could not locate eval_sparsity_common.sh. Set EVAL_COMMON_SCRIPT=/absolute/path/to/eval_sparsity_common.sh." >&2
   exit 1
 fi
 exec "$common_script"
