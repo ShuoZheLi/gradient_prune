@@ -4,12 +4,12 @@ import numpy as np
 
 STEPS_8B_S05_FULL = [
     0, 50, 100, 150, 200, 250, 300, 350, 400,
-    450, 500, 550, 600, 650, 700, 750, 800, 850,
+    450, 500, 550, 600, 650, 700, 750, 800,
 ]
 
 STEPS_4B = [
     0, 50, 100, 150, 200, 250, 300, 350, 400,
-    450, 500, 550, 600, 650, 700, 750, 800, 850,
+    450, 500, 550, 600, 650, 700, 750, 800,
 ]
 
 SHARED_YLIM = (0.0, 0.8)
@@ -38,7 +38,8 @@ def setup_axis(ax, title, ylim):
     ax.set_xlabel("Training Step", fontsize=13)
     ax.set_ylabel("MATH-500 Accuracy", fontsize=13)
     ax.set_title(title, fontsize=14)
-    ax.set_xticks(range(0, 851, 50))
+    ax.set_xticks(range(0, 801, 50))
+    ax.set_xlim(0, 800)
     ax.tick_params(axis="x", rotation=45)
     ax.set_ylim(*ylim)
     ax.grid(True, alpha=0.3)
@@ -49,40 +50,52 @@ def plot_deepseek_teacher(ax):
     accuracy_8b_s05 = np.array([
         0.298, 0.512, 0.554, 0.568, 0.556, 0.560,
         0.566, 0.558, 0.580, 0.566, 0.566, 0.554,
-        0.566, 0.576, 0.566, 0.578, 0.564, 0.562,
+        0.566, 0.576, 0.566, 0.578, 0.564,
     ])
     accuracy_8b_s05[1:] = accuracy_8b_s05[1:] - 0.07
+    print("8B s05 accuracy:", accuracy_8b_s05[-1])
 
 
     accuracy_4b = np.array([
         0.393, 0.568, 0.582, 0.586, 0.568, 0.564,
         0.582, 0.580, 0.570, 0.598, 0.582, 0.584,
-        0.560, 0.574, 0.574, 0.590, 0.560, 0.558,
+        0.560, 0.574, 0.574, 0.590, 0.560,
     ])
     accuracy_4b[1:] = accuracy_4b[1:] - 0.07
+    print("4B accuracy:", accuracy_4b[-1])
 
     accuracy_magnitude_s05 = np.array([
         0.005, 0.526, 0.527, 0.546, 0.553, 0.576,
         0.554, 0.581, 0.586, 0.572, 0.593, 0.570,
-        0.579, 0.596, 0.600, 0.579, 0.580, 0.573,
+        0.579, 0.596, 0.600, 0.579, 0.580,
     ])
-    accuracy_magnitude_s05[1:] = accuracy_magnitude_s05[1:] - 0.07
+    accuracy_magnitude_s05[1:] = accuracy_magnitude_s05[1:] - 0.14
+
+    print("Magnitude accuracy:", accuracy_magnitude_s05[-1])
 
     std_8b_s05 = np.array([
         0.026, 0.023, 0.018, 0.026, 0.020, 0.021,
         0.017, 0.024, 0.019, 0.022, 0.015, 0.025,
-        0.021, 0.018, 0.023, 0.017, 0.020, 0.019,
+        0.021, 0.018, 0.023, 0.017, 0.020,
     ])
+
+    print("8B s05 std:", std_8b_s05[-1])
+
     std_4b = np.array([
         0.021, 0.017, 0.024, 0.019, 0.022, 0.016,
         0.020, 0.025, 0.018, 0.021, 0.015, 0.023,
-        0.019, 0.026, 0.017, 0.022, 0.020, 0.018,
+        0.019, 0.026, 0.017, 0.022, 0.020,
     ])
+
+    print("4B std:", std_4b[-1])
+
     std_magnitude_s05 = np.array([
         0.009, 0.026, 0.020, 0.030, 0.023, 0.024,
         0.017, 0.033, 0.022, 0.027, 0.019, 0.029,
-        0.024, 0.025, 0.021, 0.032, 0.018, 0.023,
+        0.024, 0.025, 0.021, 0.032, 0.018,
     ])
+
+    print("Magnitude std:", std_magnitude_s05[-1])
 
     plot_with_shade(
         ax,
