@@ -160,20 +160,24 @@ for method in methods:
 # Sparsity labels
 # ============================================================
 
-for _, r in df.iterrows():
+for method in methods:
 
-    if r["Sparsity"] in {35, 45}:
-        continue
-
-    ax.annotate(
-        f"{int(r['Sparsity'])}%",
-        xy=(r["D"], r["Observed"]),
-        xytext=(5, -12),
-        textcoords="offset points",
-        fontsize=10.0,
-        ha="left",
-        va="center",
+    g = (
+        df[df["Method"] == method]
+        .sort_values("Sparsity")
     )
+
+    for _, r in g.iloc[[0, -1]].iterrows():
+
+        ax.annotate(
+            f"{int(r['Sparsity'])}%",
+            xy=(r["D"], r["Observed"]),
+            xytext=(5, -12),
+            textcoords="offset points",
+            fontsize=10.0,
+            ha="left",
+            va="center",
+        )
 
 
 # ============================================================
