@@ -34,7 +34,6 @@ data = [
 ]
 
 df = pd.DataFrame(data, columns=["Sparsity", "Method", "D", "RecoveryFraction"])
-df = df[df["D"] <= 4]
 
 methods = ["Magnitude", "WANDA", "WANDA++", "SparseGPT"]
 markers = {"Magnitude": "o", "WANDA": "s", "WANDA++": "D", "SparseGPT": "^"}
@@ -65,7 +64,6 @@ ax.set_title("Recoverability vs. immediate pruning damage", loc="left",
              fontsize=13, fontweight="bold")
 
 ax.set_ylim(0.12, 0.76)
-ax.set_xlim(right=4)
 ax.grid(True, alpha=0.22)
 ax.legend(frameon=False)
 
@@ -73,13 +71,13 @@ ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
 # "better ←" cue beneath x-axis
-# ax.annotate(
-#     "better",
-#     xy=(0.08, -0.12), xycoords="axes fraction",
-#     xytext=(0.25, -0.12), textcoords="axes fraction",
-#     arrowprops=dict(arrowstyle="<-", lw=1.2),
-#     ha="center", va="center", fontsize=10
-# )
+ax.annotate(
+    "better",
+    xy=(0.08, -0.12), xycoords="axes fraction",
+    xytext=(0.25, -0.12), textcoords="axes fraction",
+    arrowprops=dict(arrowstyle="<-", lw=1.2),
+    ha="center", va="center", fontsize=10
+)
 
 fig.tight_layout()
 
