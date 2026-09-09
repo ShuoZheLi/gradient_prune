@@ -7,20 +7,51 @@ import matplotlib.pyplot as plt
 # Replace these with your actual results
 # ============================================================
 
-methods = ["WANDA", "DAP", "Magnitude"]
+methods = [
+    "Generic Instruct 4B",
+    "Magnitude",
+    "SparseGPT",
+    "WANDA",
+    "WANDA++",
+    "DAP",
+]
 
 # Accuracy immediately after pruning
 post_pruning = np.array([
-    0.43,   # WANDA
-    0.39,   # DAP
-    0.36,   # Magnitude
+    0.393,
+    0.004,
+    0.325,
+    0.298,
+    0.345,
+    0.245,
+])
+
+post_pruning_std = np.array([
+    0.021,
+    0.008,
+    0.024,
+    0.026,
+    0.024,
+    0.027,
 ])
 
 # Accuracy after distillation
 post_distillation = np.array([
-    0.58,   # WANDA
-    0.64,   # DAP
-    0.60,   # Magnitude
+    0.489,
+    0.508,
+    0.557,
+    0.570,
+    0.580,
+    0.625,
+])
+
+post_distillation_std = np.array([
+    0.020,
+    0.017,
+    0.020,
+    0.020,
+    0.019,
+    0.018,
 ])
 
 x = np.arange(len(methods))
@@ -30,7 +61,7 @@ x = np.arange(len(methods))
 # Plot
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(5.2, 4.5))
+fig, ax = plt.subplots(figsize=(7.6, 4.8))
 
 
 # ------------------------------------------------------------
@@ -62,6 +93,18 @@ ax.scatter(
     zorder=3,
 )
 
+ax.errorbar(
+    x,
+    post_pruning,
+    yerr=post_pruning_std,
+    fmt="none",
+    ecolor="0.25",
+    elinewidth=1.5,
+    capsize=4,
+    capthick=1.5,
+    zorder=2,
+)
+
 
 # ------------------------------------------------------------
 # Post-distillation points
@@ -77,13 +120,25 @@ ax.scatter(
     zorder=3,
 )
 
+ax.errorbar(
+    x,
+    post_distillation,
+    yerr=post_distillation_std,
+    fmt="none",
+    ecolor="black",
+    elinewidth=1.5,
+    capsize=4,
+    capthick=1.5,
+    zorder=2,
+)
+
 
 # ============================================================
 # Axes
 # ============================================================
 
 ax.set_xticks(x)
-ax.set_xticklabels(methods, fontsize=13)
+ax.set_xticklabels(methods, fontsize=11, rotation=18, ha="right")
 
 ax.set_ylabel("Accuracy", fontsize=14)
 
@@ -93,7 +148,7 @@ ax.tick_params(axis="x", length=0)
 ax.set_xlim(-0.55, len(methods) - 0.45)
 
 # Adjust according to your real range
-ax.set_ylim(0.30, 0.68)
+ax.set_ylim(0.20, 0.68)
 
 
 # ============================================================
