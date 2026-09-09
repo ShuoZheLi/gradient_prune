@@ -30,7 +30,7 @@ accuracy_8b_s05 = np.array([
 
 accuracy_8b_s05[1:] = accuracy_8b_s05[1:] + 0.04
 accuracy_8b_s05 = accuracy_8b_s05 - 0.07
-
+print("accuracy_8b_s05:", accuracy_8b_s05)
 
 accuracy_4b = np.array([
     0.463, 0.514, 0.560, 0.564, 0.556, 0.572,
@@ -40,7 +40,7 @@ accuracy_4b = np.array([
 
 accuracy_4b[1:] = accuracy_4b[1:] - 0.01
 accuracy_4b = accuracy_4b - 0.07
-
+print("accuracy_4b:", accuracy_4b)
 
 accuracy_magnitude_s05 = np.array([
     0.004, 0.528, 0.526, 0.548, 0.552, 0.578,
@@ -48,8 +48,9 @@ accuracy_magnitude_s05 = np.array([
     0.578, 0.598, 0.598, 0.580, 0.578,
 ])
 
-accuracy_magnitude_s05[1:] = accuracy_magnitude_s05[1:] - 0.07
 
+accuracy_magnitude_s05[1:] = accuracy_magnitude_s05[1:] - 0.07
+print("accuracy_magnitude_s05:", accuracy_magnitude_s05)
 
 std_8b_s05 = np.array([
     0.026, 0.023, 0.018, 0.026, 0.020, 0.021,
@@ -57,13 +58,11 @@ std_8b_s05 = np.array([
     0.021, 0.018, 0.023, 0.017, 0.020,
 ])
 
-
 std_4b = np.array([
     0.021, 0.017, 0.024, 0.019, 0.022, 0.016,
     0.020, 0.025, 0.018, 0.021, 0.015, 0.023,
     0.019, 0.026, 0.017, 0.022, 0.020,
 ])
-
 
 std_magnitude_s05 = np.array([
     0.008, 0.027, 0.019, 0.031, 0.022, 0.025,
@@ -265,13 +264,13 @@ fig.tight_layout()
 
 # Recommended for LaTeX: vector PDF
 fig.savefig(
-    "sft_accuracy_comparison_with_magnitude.pdf",
+    "plot_eval_acc_with_magnitude.pdf",
     bbox_inches="tight",
 )
 
 # PNG version if needed elsewhere
 fig.savefig(
-    "sft_accuracy_comparison_with_magnitude.png",
+    "plot_eval_acc_with_magnitude.png",
     dpi=400,
     bbox_inches="tight",
 )
