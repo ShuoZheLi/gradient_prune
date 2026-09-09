@@ -144,10 +144,6 @@ ax.errorbar(
 ax.set_xticks(x)
 ax.set_xticklabels(methods, fontsize=9, rotation=18, ha="right")
 
-label_shift = ScaledTranslation(3 / 72, 0, fig.dpi_scale_trans)
-for label in ax.get_xticklabels()[1:]:
-    label.set_transform(label.get_transform() + label_shift)
-
 ax.set_ylabel("Accuracy", fontsize=11)
 
 ax.tick_params(axis="y", labelsize=9)
@@ -181,6 +177,38 @@ ax.legend(
     fontsize=9,
     loc="upper left",
 )
+
+
+# ============================================================
+# Fix the "Generic\nInstruct 4B" / "Magnitude" overlap
+# ------------------------------------------------------------
+# The two-line first label, once rotated 18deg with ha="right", extends
+# further right than a single-line label at the same anchor, so it can
+# collide with the next tick's label. Instead of guessing a shift value
+# (which depends on your font/DPI/backend), measure the actual rendered
+# bounding boxes and shift labels[1:] right by exactly enough to clear
+# the overlap, plus a small margin.
+# ============================================================
+
+MARGIN_PT = 4  # extra breathing room beyond just-touching, in points
+
+fig.canvas.draw()  # force a render pass so bounding boxes are valid
+renderer = fig.canvas.get_renderer()
+labels = ax.get_xticklabels()
+
+b0 = labels[0].get_window_extent(renderer=renderer)  # "Generic\nInstruct 4B"
+b1 = labels[1].get_window_extent(renderer=renderer)  # "Magnitude"
+
+overlap_px = b0.x1 - b1.x0                # > 0 means the two boxes overlap
+overlap_pt = overlap_px * 72 / fig.dpi    # convert display px -> points
+
+shift_pt = max(0.0, overlap_pt + MARGIN_PT)
+print(f"measured overlap = {overlap_pt:.2f}pt -> applying shift = {shift_pt:.2f}pt")
+
+if shift_pt > 0:
+    label_shift = ScaledTranslation(shift_pt / 72, 0, fig.dpi_scale_trans)
+    for label in labels[1:]:
+        label.set_transform(label.get_transform() + label_shift)
 
 
 # For LaTeX / paper
