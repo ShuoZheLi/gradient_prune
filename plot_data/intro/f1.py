@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.transforms import ScaledTranslation
 
 
 # ============================================================
@@ -61,7 +62,10 @@ x = np.arange(len(methods))
 # Plot
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(6.2, 4.8))
+fig, ax = plt.subplots(
+    figsize=(4.2, 3.4),
+    constrained_layout=True,
+)
 
 
 # ------------------------------------------------------------
@@ -138,12 +142,16 @@ ax.errorbar(
 # ============================================================
 
 ax.set_xticks(x)
-ax.set_xticklabels(methods, fontsize=11, rotation=18, ha="right")
+ax.set_xticklabels(methods, fontsize=9, rotation=18, ha="right")
 
-ax.set_ylabel("Accuracy", fontsize=14)
+label_shift = ScaledTranslation(3 / 72, 0, fig.dpi_scale_trans)
+for label in ax.get_xticklabels()[1:]:
+    label.set_transform(label.get_transform() + label_shift)
 
-ax.tick_params(axis="y", labelsize=12)
-ax.tick_params(axis="x", length=0)
+ax.set_ylabel("Accuracy", fontsize=11)
+
+ax.tick_params(axis="y", labelsize=9)
+ax.tick_params(axis="x", labelsize=9, length=0)
 
 ax.set_xlim(-0.55, len(methods) - 0.45)
 
@@ -170,17 +178,14 @@ ax.grid(
 
 ax.legend(
     frameon=False,
-    fontsize=11,
+    fontsize=9,
     loc="upper left",
 )
 
 
-plt.tight_layout()
-
 # For LaTeX / paper
 plt.savefig(
-    "post_pruning_distillation.pdf",
-    bbox_inches="tight",
+    "intro_f1_1.pdf",
 )
 
 plt.show()

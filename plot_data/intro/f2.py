@@ -79,16 +79,15 @@ markers = {
 # ============================================================
 
 plt.rcParams.update({
-    "font.size": 13.5,
+    "font.size": 9,
 
-    "axes.labelsize": 16,
-    "axes.titlesize": 15,
+    "axes.labelsize": 11,
 
-    "xtick.labelsize": 12.5,
-    "ytick.labelsize": 12.5,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
 
-    "legend.fontsize": 11.5,
-    "legend.title_fontsize": 11.5,
+    "legend.fontsize": 9,
+    "legend.title_fontsize": 9,
 
     # Better PDF font embedding
     "pdf.fonttype": 42,
@@ -101,7 +100,8 @@ plt.rcParams.update({
 # ============================================================
 
 fig, ax = plt.subplots(
-    figsize=(7.2, 4.8)
+    figsize=(4.2, 3.4),
+    constrained_layout=True,
 )
 
 
@@ -148,7 +148,7 @@ for method in methods:
             xy=(r["D"], r["Observed"]),
             xytext=(5, -12),
             textcoords="offset points",
-            fontsize=10.0,
+            fontsize=8,
             ha="left",
             va="center",
         )
@@ -184,8 +184,10 @@ leg1 = ax.legend(
     loc="upper right",
     frameon=False,
     title="",
-    handlelength=2.2,
-    labelspacing=0.45,
+    ncol=2,
+    handlelength=1.6,
+    columnspacing=0.9,
+    labelspacing=0.35,
 )
 
 ax.add_artist(leg1)
@@ -197,27 +199,14 @@ ax.add_artist(leg1)
 
 ax.set_xlabel(
     r"Immediate damage $D$ (normalized)",
-    fontsize=16,
+    fontsize=11,
     labelpad=7,
 )
 
 ax.set_ylabel(
     "Recoverability",
-    fontsize=16,
+    fontsize=11,
     labelpad=7,
-)
-
-
-# ============================================================
-# Title
-# ============================================================
-
-ax.set_title(
-    "Damage–recoverability landscape",
-    loc="left",
-    fontsize=15,
-    fontweight="bold",
-    pad=9,
 )
 
 
@@ -231,7 +220,7 @@ ax.set_ylim(0.22, 0.9)
 ax.tick_params(
     axis="both",
     which="major",
-    labelsize=12.5,
+    labelsize=9,
     width=1.1,
     length=4.5,
 )
@@ -282,32 +271,23 @@ ax.spines["bottom"].set_linewidth(1.1)
 
 
 # ============================================================
-# Layout
-# ============================================================
-
-fig.tight_layout()
-
-
-# ============================================================
 # Save
 # ============================================================
 
 # Use this in LaTeX
-pdf_out = "figure_AB_overlaid_observed_predicted.pdf"
+pdf_out = "intro_f1_2.pdf"
 
 fig.savefig(
     pdf_out,
-    bbox_inches="tight",
 )
 
 
 # Optional PNG preview
-png_out = "figure_AB_overlaid_observed_predicted.png"
+png_out = "intro_f1_2.png"
 
 fig.savefig(
     png_out,
     dpi=400,
-    bbox_inches="tight",
 )
 
 
