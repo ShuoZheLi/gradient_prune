@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # ============================================================
 
 methods = [
-    "Generic Instruct 4B",
+    "Generic\nInstruct 4B",
     "Magnitude",
     "SparseGPT",
     "WANDA",
@@ -61,7 +61,7 @@ x = np.arange(len(methods))
 # Plot
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(7.6, 4.8))
+fig, ax = plt.subplots(figsize=(6.2, 4.8))
 
 
 # ------------------------------------------------------------
