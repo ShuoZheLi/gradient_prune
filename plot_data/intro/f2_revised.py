@@ -108,7 +108,7 @@ plt.rcParams.update({
 # ============================================================
 
 fig, ax = plt.subplots(
-    figsize=(4.2, 3.4),
+    figsize=(11, 6),
     constrained_layout=True,
 )
 
@@ -132,9 +132,9 @@ for method in methods:
         g["D"],
         g["Observed"],
         marker=markers[method],
-        linewidth=2.6,
+        linewidth=5.5,
         markersize=8.5,
-        markeredgewidth=1.2,
+        markeredgewidth=2.2,
         color=method_colors[method],
         label=method,
     )
@@ -157,7 +157,8 @@ for method in methods:
             xy=(r["D"], r["Observed"]),
             xytext=(5, -12),
             textcoords="offset points",
-            fontsize=8,
+            fontsize=13,
+            fontweight="semibold",
             ha="left",
             va="center",
         )
@@ -181,7 +182,7 @@ for method in methods:
             [0], [0],
             color=line.get_color(),
             marker=markers[method],
-            linewidth=2.4,
+            linewidth=5.5,
             markersize=7.5,
             label=method,
         )
@@ -197,6 +198,7 @@ leg1 = ax.legend(
     handlelength=1.6,
     columnspacing=0.9,
     labelspacing=0.35,
+    prop={"weight": "semibold", "size": 18},
 )
 
 ax.add_artist(leg1)
@@ -208,14 +210,14 @@ ax.add_artist(leg1)
 
 ax.set_xlabel(
     r"Immediate damage $D$ (normalized)",
-    fontsize=11,
-    labelpad=7,
+    fontsize=28,
+    fontweight="semibold", labelpad=12
 )
 
 ax.set_ylabel(
     "Recoverability",
-    fontsize=11,
-    labelpad=7,
+    fontsize=33,
+    fontweight="semibold", labelpad=12
 )
 
 
@@ -229,10 +231,13 @@ ax.set_ylim(0.22, 0.9)
 ax.tick_params(
     axis="both",
     which="major",
-    labelsize=9,
-    width=1.1,
+    labelsize=24,
+    width=3,
     length=4.5,
 )
+
+plt.setp(ax.get_xticklabels(), fontweight="semibold")
+plt.setp(ax.get_yticklabels(), fontweight="semibold")
 
 
 # ============================================================
@@ -241,8 +246,9 @@ ax.tick_params(
 
 ax.grid(
     True,
-    alpha=0.20,
-    linewidth=0.8,
+    linestyle=":",
+    alpha=0.35,
+    linewidth=2.5,
 )
 
 ax.set_axisbelow(True)
@@ -255,8 +261,8 @@ ax.set_axisbelow(True)
 ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
-ax.spines["left"].set_linewidth(1.1)
-ax.spines["bottom"].set_linewidth(1.1)
+ax.spines["left"].set_linewidth(3)
+ax.spines["bottom"].set_linewidth(3)
 
 
 # ============================================================

@@ -9,7 +9,7 @@ from matplotlib.transforms import ScaledTranslation
 # ============================================================
 
 methods = [
-    "Generic\nInstruct 4B",
+    "Qwen3-4B",
     "Magnitude",
     "SparseGPT",
     "WANDA++",
@@ -63,7 +63,7 @@ x = np.arange(len(methods))
 # ============================================================
 
 fig, ax = plt.subplots(
-    figsize=(4.2, 3.4),
+    figsize=(11,6),
     constrained_layout=True,
 )
 
@@ -73,7 +73,7 @@ fig, ax = plt.subplots(
 # ------------------------------------------------------------
 
 method_colors = {
-    "Generic\nInstruct 4B": "0.55",
+    "Qwen3-4B": "0.55",
     "Magnitude": "#1f77b4",
     "WANDA": "#ff7f0e",
     "WANDA++": "#2ca02c",
@@ -86,7 +86,7 @@ for i in range(len(methods)):
         [x[i], x[i]],
         [post_pruning[i], post_distillation[i]],
         linestyle="--",
-        linewidth=1.8,
+        linewidth=5.5,
         color=method_colors[methods[i]],
         zorder=1,
     )
@@ -111,9 +111,9 @@ ax.errorbar(
     yerr=post_pruning_std,
     fmt="none",
     ecolor="0.25",
-    elinewidth=1.5,
-    capsize=4,
-    capthick=1.5,
+    elinewidth=4.5,
+    capsize=5,
+    capthick=3.5,
     zorder=2,
 )
 
@@ -138,9 +138,9 @@ ax.errorbar(
     yerr=post_distillation_std,
     fmt="none",
     ecolor="black",
-    elinewidth=1.5,
-    capsize=4,
-    capthick=1.5,
+    elinewidth=4.5,
+    capsize=5,
+    capthick=3.5,
     zorder=2,
 )
 
@@ -150,12 +150,15 @@ ax.errorbar(
 # ============================================================
 
 ax.set_xticks(x)
-ax.set_xticklabels(methods, fontsize=9, rotation=18, ha="right")
+ax.set_xticklabels(methods, fontsize=24, rotation=18, ha="right")
 
-ax.set_ylabel("Accuracy", fontsize=11)
+ax.set_ylabel("Accuracy", fontsize=35, fontweight="semibold", labelpad=12)
 
-ax.tick_params(axis="y", labelsize=9)
-ax.tick_params(axis="x", labelsize=9, length=0)
+ax.tick_params(axis="y", labelsize=24)
+ax.tick_params(axis="x", labelsize=24, length=0)
+
+plt.setp(ax.get_xticklabels(), fontweight="semibold")
+plt.setp(ax.get_yticklabels(), fontweight="semibold")
 
 ax.set_xlim(-0.55, len(methods) - 0.45)
 
@@ -170,25 +173,26 @@ ax.set_ylim(0.20, 0.68)
 ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
-ax.spines["left"].set_linewidth(1.2)
-ax.spines["bottom"].set_linewidth(1.2)
+ax.spines["left"].set_linewidth(3)
+ax.spines["bottom"].set_linewidth(3)
 
 ax.grid(
     axis="y",
     linestyle=":",
-    linewidth=0.8,
-    alpha=0.35,
+    linewidth=2.5,
+    alpha=0.55,
 )
 
 ax.legend(
     frameon=False,
-    fontsize=9,
+    fontsize=18,
+    prop={"weight": "semibold", "size": 18},
     loc="upper left",
 )
 
 
 # ============================================================
-# Fix the "Generic\nInstruct 4B" / "Magnitude" overlap
+# Fix the "Qwen3-4B" / "Magnitude" overlap
 # ------------------------------------------------------------
 # The two-line first label, once rotated 18deg with ha="right", extends
 # further right than a single-line label at the same anchor, so it can
@@ -204,7 +208,7 @@ fig.canvas.draw()  # force a render pass so bounding boxes are valid
 renderer = fig.canvas.get_renderer()
 labels = ax.get_xticklabels()
 
-b0 = labels[0].get_window_extent(renderer=renderer)  # "Generic\nInstruct 4B"
+b0 = labels[0].get_window_extent(renderer=renderer)  # "Qwen3-4B"
 b1 = labels[1].get_window_extent(renderer=renderer)  # "Magnitude"
 
 overlap_px = b0.x1 - b1.x0                # > 0 means the two boxes overlap

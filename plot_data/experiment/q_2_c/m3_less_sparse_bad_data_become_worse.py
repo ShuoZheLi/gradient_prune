@@ -124,20 +124,54 @@ for method in methods:
         .sort_values("Sparsity")
     )
 
+    c = method_colors[method]
+
     # ----------------------------
     # Observed
     # ----------------------------
 
-    obs_line, = ax.plot(
+    ax.plot(
         g["D"],
         g["Observed"],
         marker=markers[method],
         linewidth=2.6,
         markersize=8.5,
         markeredgewidth=1.2,
-        color=method_colors[method],
+        color=c,
         label=method,
     )
+
+    # ----------------------------
+    # Predicted
+    # ----------------------------
+
+    ax.plot(
+        g["D"],
+        g["Predicted"],
+        marker=markers[method],
+        linewidth=2.1,
+        markersize=8.0,
+        markeredgewidth=1.3,
+        linestyle="--",
+        markerfacecolor="white",
+        markeredgecolor=c,
+        color=c,
+    )
+
+    # ----------------------------
+    # Correspondence connectors
+    # ----------------------------
+
+    for _, r in g.iterrows():
+
+        ax.plot(
+            [r["D"], r["D"]],
+            [r["Observed"], r["Predicted"]],
+            linewidth=1.0,
+            alpha=0.28,
+            color=c,
+        )
+
 
 # ============================================================
 # Sparsity labels
@@ -150,16 +184,23 @@ for method in methods:
         .sort_values("Sparsity")
     )
 
-    for _, r in g.iloc[[0, -1]].iterrows():
+    label_rows = [g.iloc[-1]]
+
+    if method in {"Magnitude", "WANDA++"}:
+        label_rows.insert(0, g.iloc[0])
+
+    for r in label_rows:
+
+        is_30_percent = r["Sparsity"] == 30
 
         ax.annotate(
             f"{int(r['Sparsity'])}%",
             xy=(r["D"], r["Observed"]),
-            xytext=(5, -12),
+            xytext=(0, 9) if is_30_percent else (5, -12),
             textcoords="offset points",
             fontsize=8,
-            ha="left",
-            va="center",
+            ha="center" if is_30_percent else "left",
+            va="bottom" if is_30_percent else "center",
         )
 
 
@@ -171,15 +212,10 @@ method_handles = []
 
 for method in methods:
 
-    line = next(
-        l for l in ax.get_lines()
-        if l.get_label() == method
-    )
-
     method_handles.append(
         Line2D(
             [0], [0],
-            color=line.get_color(),
+            color=method_colors[method],
             marker=markers[method],
             linewidth=2.4,
             markersize=7.5,
@@ -203,6 +239,41 @@ ax.add_artist(leg1)
 
 
 # ============================================================
+# Style legend
+# ============================================================
+
+style_handles = [
+    Line2D(
+        [0], [0],
+        color="black",
+        linestyle="-",
+        marker="o",
+        linewidth=2.2,
+        markersize=7,
+        label=r"Observed $R/D$",
+    ),
+    Line2D(
+        [0], [0],
+        color="black",
+        linestyle="--",
+        marker="o",
+        markerfacecolor="white",
+        linewidth=2.0,
+        markersize=7,
+        label=r"Predicted $\widehat{R}/\widehat{D}$",
+    ),
+]
+
+ax.legend(
+    handles=style_handles,
+    loc="lower left",
+    frameon=False,
+    handlelength=2.0,
+    labelspacing=0.35,
+)
+
+
+# ============================================================
 # Axes labels
 # ============================================================
 
@@ -220,11 +291,19 @@ ax.set_ylabel(
 
 
 # ============================================================
+# Title
+# ============================================================
+
+# Keep the panel title in the LaTeX subfigure caption, matching q2.py.
+
+
+# ============================================================
 # Axis limits / ticks
 # ============================================================
 
 ax.set_xlim(0.45, 4.55)
-ax.set_ylim(0.22, 0.9)
+ax.set_xticks([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5])
+ax.set_ylim(0.2, 0.95)
 
 ax.tick_params(
     axis="both",
@@ -284,19 +363,21 @@ ax.spines["bottom"].set_linewidth(1.1)
 # ============================================================
 
 # Use this in LaTeX
-pdf_out = "intro_f1_2.pdf"
+pdf_out = "figure_AB_overlaid_observed_predicted.pdf"
 
 fig.savefig(
     pdf_out,
+    bbox_inches="tight",
 )
 
 
 # Optional PNG preview
-png_out = "intro_f1_2.png"
+png_out = "figure_AB_overlaid_observed_predicted.png"
 
 fig.savefig(
     png_out,
     dpi=400,
+    bbox_inches="tight",
 )
 
 

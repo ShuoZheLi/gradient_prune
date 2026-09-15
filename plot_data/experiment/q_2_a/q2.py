@@ -47,10 +47,29 @@ rows = [
 
 df = pd.DataFrame(
     rows,
-    columns=["Sparsity", "Method", "D", "Observed", "Predicted"],
+    columns=[
+        "Sparsity",
+        "Method",
+        "D",
+        "Observed",
+        "Predicted",
+    ],
 )
 
-df = df[df["D"] <= 4.4]
+# Match the x-range used in your previous figure.
+df = df[df["D"] <= 4.4].copy()
+
+
+# ============================================================
+# Compute measured remaining damage
+#
+# Observed = R / D
+#
+# I = D - R
+#   = D * (1 - R/D)
+# ============================================================
+
+df["I"] = df["D"] * (1.0 - df["Observed"])
 
 
 # ============================================================
@@ -124,13 +143,9 @@ for method in methods:
         .sort_values("Sparsity")
     )
 
-    # ----------------------------
-    # Observed
-    # ----------------------------
-
-    obs_line, = ax.plot(
+    ax.plot(
         g["D"],
-        g["Observed"],
+        g["I"],
         marker=markers[method],
         linewidth=2.6,
         markersize=8.5,
@@ -139,8 +154,12 @@ for method in methods:
         label=method,
     )
 
+
 # ============================================================
 # Sparsity labels
+#
+# Label the last visible point of each trajectory, but show the first
+# (30% sparsity) label only for Magnitude and WANDA++.
 # ============================================================
 
 for method in methods:
@@ -150,36 +169,97 @@ for method in methods:
         .sort_values("Sparsity")
     )
 
-    for _, r in g.iloc[[0, -1]].iterrows():
+    label_rows = [g.iloc[-1]]
+
+    if method in {"Magnitude", "WANDA++"}:
+        label_rows.insert(0, g.iloc[0])
+
+    for r in label_rows:
+
+        is_30_percent = r["Sparsity"] == 30
 
         ax.annotate(
             f"{int(r['Sparsity'])}%",
-            xy=(r["D"], r["Observed"]),
-            xytext=(5, -12),
+            xy=(r["D"], r["I"]),
+            xytext=(0, 9) if is_30_percent else (5, -12),
             textcoords="offset points",
             fontsize=8,
-            ha="left",
-            va="center",
+            ha="center" if is_30_percent else "left",
+            va="bottom" if is_30_percent else "center",
         )
 
 
 # ============================================================
-# Method legend
+# Highlight one ranking reversal
+#
+# At the same sparsity:
+#
+#     D_WANDA < D_DAP
+#
+# but
+#
+#     I_WANDA > I_DAP
+#
+# Here we use the 55% pair because the reversal is visually clearer.
+# ============================================================
+
+sparsity_to_highlight = 55
+
+wanda = df[
+    (df["Method"] == "WANDA")
+    & (df["Sparsity"] == sparsity_to_highlight)
+].iloc[0]
+
+dap = df[
+    (df["Method"] == "DAP")
+    & (df["Sparsity"] == sparsity_to_highlight)
+].iloc[0]
+
+
+# Light connector between the two same-budget students
+# ax.plot(
+#     [wanda["D"], dap["D"]],
+#     [wanda["I"], dap["I"]],
+#     linestyle="--",
+#     linewidth=1.3,
+#     color="0.35",
+#     alpha=0.8,
+#     zorder=1,
+# )
+
+
+# Annotation pointing toward the reversal
+mid_x = 0.5 * (wanda["D"] + dap["D"])
+mid_y = 0.5 * (wanda["I"] + dap["I"])
+
+# ax.annotate(
+#     "ranking reversal",
+#     xy=(mid_x, mid_y),
+#     xytext=(-72, 28),
+#     textcoords="offset points",
+#     fontsize=8.5,
+#     ha="center",
+#     va="center",
+#     arrowprops=dict(
+#         arrowstyle="->",
+#         linewidth=1.1,
+#         color="0.25",
+#     ),
+# )
+
+
+# ============================================================
+# Legend
 # ============================================================
 
 method_handles = []
 
 for method in methods:
 
-    line = next(
-        l for l in ax.get_lines()
-        if l.get_label() == method
-    )
-
     method_handles.append(
         Line2D(
             [0], [0],
-            color=line.get_color(),
+            color=method_colors[method],
             marker=markers[method],
             linewidth=2.4,
             markersize=7.5,
@@ -188,18 +268,15 @@ for method in methods:
     )
 
 
-leg1 = ax.legend(
+ax.legend(
     handles=method_handles,
-    loc="upper right",
+    loc="upper left",
     frameon=False,
-    title="",
     ncol=2,
     handlelength=1.6,
     columnspacing=0.9,
     labelspacing=0.35,
 )
-
-ax.add_artist(leg1)
 
 
 # ============================================================
@@ -213,7 +290,7 @@ ax.set_xlabel(
 )
 
 ax.set_ylabel(
-    "Recoverability",
+    r"Remaining damage $I$",
     fontsize=11,
     labelpad=7,
 )
@@ -224,7 +301,16 @@ ax.set_ylabel(
 # ============================================================
 
 ax.set_xlim(0.45, 4.55)
-ax.set_ylim(0.22, 0.9)
+ax.set_xticks([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5])
+
+# Automatic value is fine, but explicitly setting it helps
+# preserve identical dimensions across repeated plots.
+max_i = df["I"].max()
+
+ax.set_ylim(
+    0.0,
+    max_i * 1.12,
+)
 
 ax.tick_params(
     axis="both",
@@ -260,22 +346,16 @@ ax.spines["bottom"].set_linewidth(1.1)
 
 
 # ============================================================
-# "better" annotation
+# Optional panel title
+#
+# I would probably NOT put this inside the plot if your LaTeX
+# subfigure caption already says it.
 # ============================================================
 
-# ax.annotate(
-#     "better",
-#     xy=(0.06, -0.12),
-#     xycoords="axes fraction",
-#     xytext=(0.22, -0.12),
-#     textcoords="axes fraction",
-#     arrowprops=dict(
-#         arrowstyle="<-",
-#         lw=1.4,
-#     ),
-#     ha="center",
-#     va="center",
-#     fontsize=11.5,
+# ax.set_title(
+#     "Immediate damage alone is insufficient",
+#     fontsize=11,
+#     pad=8,
 # )
 
 
@@ -283,22 +363,20 @@ ax.spines["bottom"].set_linewidth(1.1)
 # Save
 # ============================================================
 
-# Use this in LaTeX
-pdf_out = "intro_f1_2.pdf"
+pdf_out = "remaining_damage_vs_immediate_damage.pdf"
 
 fig.savefig(
     pdf_out,
+    bbox_inches="tight",
 )
 
-
-# Optional PNG preview
-png_out = "intro_f1_2.png"
+png_out = "remaining_damage_vs_immediate_damage.png"
 
 fig.savefig(
     png_out,
     dpi=400,
+    bbox_inches="tight",
 )
-
 
 plt.show()
 
