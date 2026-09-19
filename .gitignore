@@ -286,3 +286,5 @@ saved_calibration_dataset/**
 **tmp/**
 
 *.pdf
+
+/data/shuozhe/gradient_prune/plot_data/*.pdf

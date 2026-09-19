@@ -144,6 +144,15 @@ ax.errorbar(
     zorder=2,
 )
 
+ax.axhline(
+    y=0.736,
+    color="black",
+    linestyle=":",
+    linewidth=3,
+    label="Teacher (73.6)",
+    zorder=1,
+)
+
 
 # ============================================================
 # Axes
@@ -163,7 +172,7 @@ plt.setp(ax.get_yticklabels(), fontweight="semibold")
 ax.set_xlim(-0.55, len(methods) - 0.45)
 
 # Adjust according to your real range
-ax.set_ylim(0.20, 0.68)
+ax.set_ylim(0.20, 0.78)
 
 
 # ============================================================
@@ -188,6 +197,7 @@ ax.legend(
     fontsize=18,
     prop={"weight": "semibold", "size": 18},
     loc="upper left",
+    bbox_to_anchor=(0, 0.95),
 )
 
 
