@@ -14,7 +14,7 @@ methods = [
     "SparseGPT",
     "WANDA++",
     "WANDA",
-    "DAP",
+    "DAP\n(ours)",
 ]
 
 # Accuracy immediately after pruning
@@ -78,7 +78,7 @@ method_colors = {
     "WANDA": "#ff7f0e",
     "WANDA++": "#2ca02c",
     "SparseGPT": "#d62728",
-    "DAP": "#9467bd",
+    "DAP\n(ours)": "#9467bd",
 }
 
 for i in range(len(methods)):

@@ -88,14 +88,14 @@ for sparsity, rho in zip(sorted(df["Sparsity"].unique()), within_rhos):
 # ============================================================
 
 plt.rcParams.update({
-    "font.size": 12,
-    "axes.labelsize": 15,
-    "axes.titlesize": 15,
-    "legend.fontsize": 11,
-    "xtick.labelsize": 11,
-    "ytick.labelsize": 11,
-    "font.family": "serif",
-    "mathtext.fontset": "stix",
+    "font.size": 9,
+    "axes.labelsize": 11,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "legend.fontsize": 9,
+    "legend.title_fontsize": 9,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
 })
 
 methods = [
@@ -108,11 +108,11 @@ methods = [
 
 # Keep the same visual convention as your existing figures.
 colors = {
-    "Magnitude": "#4C78A8",
-    "WANDA":     "#F28E2B",
-    "WANDA++":   "#59A14F",
-    "SparseGPT": "#C4554D",
-    "DAP":       "#8E6BBE",
+    "Magnitude": "#1f77b4",
+    "WANDA":     "#ff7f0e",
+    "WANDA++":   "#2ca02c",
+    "SparseGPT": "#d62728",
+    "DAP":       "#9467bd",
 }
 
 markers = {
@@ -120,7 +120,7 @@ markers = {
     "WANDA":     "s",
     "WANDA++":   "D",
     "SparseGPT": "^",
-    "DAP":       "*",
+    "DAP":       "P",
 }
 
 
@@ -128,7 +128,10 @@ markers = {
 # Figure
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(6.2, 5.4))
+fig, ax = plt.subplots(
+    figsize=(4.2, 3.4),
+    constrained_layout=True,
+)
 
 # Plot one scatter series per method.
 for method in methods:
@@ -137,12 +140,11 @@ for method in methods:
     ax.scatter(
         sub["Measured_I"],
         sub["Predicted_I"],
-        s=75 if method != "DAP" else 115,
+        s=52,
         marker=markers[method],
         color=colors[method],
-        edgecolors="white",
-        linewidths=0.7,
-        alpha=0.95,
+        edgecolors=colors[method],
+        linewidths=1.2,
         label=method,
         zorder=3,
     )
@@ -178,19 +180,25 @@ ax.plot(
 # Label only the DAP points to avoid clutter.
 dap = df[df["Method"] == "DAP"].sort_values("Sparsity")
 
+counter = 0
 for _, row in dap.iterrows():
+
+    add_y = 0
+
+    if counter == 0:
+        add_y = 0.05
+    elif counter == 1 or counter == 2:
+        add_y = 0.1
     ax.annotate(
         f"{int(row['Sparsity'])}%",
-        xy=(row["Measured_I"], row["Predicted_I"] - 0.2),
-        xytext=(0, 7),
+        xy=(row["Measured_I"], row["Predicted_I"] + add_y),
+        xytext=(0, 9),
         textcoords="offset points",
-        fontsize=9,
-        color=colors["DAP"],
+        fontsize=8,
         ha="center",
         va="bottom",
     )
-
-
+    counter += 1
 # ============================================================
 # Correlation annotation
 # ============================================================
@@ -204,13 +212,13 @@ for _, row in dap.iterrows():
 ax.text(
     0.97,
     0.05,
-    rf"Mean Spearman $\rho$ over sparsity levels = {rho_within_mean:.2f}",
+    rf"Mean within-sparsity $\rho = {rho_within_mean:.2f}$",
     transform=ax.transAxes,
     ha="right",
     va="bottom",
-    fontsize=11,
+    fontsize=8,
     bbox=dict(
-        boxstyle="round,pad=0.3",
+        boxstyle="round,pad=0.25",
         facecolor="white",
         edgecolor="0.75",
         alpha=0.9,
@@ -232,26 +240,51 @@ ax.text(
 # Axes
 # ============================================================
 
-ax.set_xlabel(r"Measured remaining damage $I$")
-ax.set_ylabel(r"Predicted remaining damage $\widehat{I}$")
+ax.set_xlabel(
+    r"Measured remaining damage $I$",
+    fontsize=11,
+    labelpad=7,
+)
+
+ax.set_ylabel(
+    r"Predicted remaining damage $\widehat{I}$",
+    fontsize=11,
+    labelpad=7,
+)
 
 ax.set_xlim(0, 2)
 ax.set_ylim(0, 2)
 
+ax.tick_params(
+    axis="both",
+    which="major",
+    labelsize=9,
+    width=1.1,
+    length=4.5,
+)
+
 ax.grid(
     True,
-    linestyle=":",
     linewidth=0.8,
-    alpha=0.45,
+    alpha=0.20,
 )
+
+ax.set_axisbelow(True)
 
 ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
+ax.spines["left"].set_linewidth(1.1)
+ax.spines["bottom"].set_linewidth(1.1)
+
 ax.legend(
     frameon=False,
     loc="upper left",
-    ncol=1,
+    ncol=2,
+    handlelength=1.6,
+    columnspacing=0.9,
+    labelspacing=0.35,
+    markerscale=0.88,
 )
 
 
@@ -259,16 +292,14 @@ ax.legend(
 # Save
 # ============================================================
 
-plt.tight_layout()
-
-plt.savefig(
+fig.savefig(
     "dap_predicted_vs_measured_remaining_damage.pdf",
     bbox_inches="tight",
 )
 
-plt.savefig(
+fig.savefig(
     "dap_predicted_vs_measured_remaining_damage.png",
-    dpi=300,
+    dpi=400,
     bbox_inches="tight",
 )
 
